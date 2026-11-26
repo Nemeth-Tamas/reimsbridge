@@ -99,6 +99,7 @@ fn transport_test(session: &Session) -> Result<(), Box<dyn Error>> {
 fn print_help() {
     println!("Usage:");
     println!("  reimsbridge-windows clipboard-check");
+    println!("  reimsbridge-windows clipboard-metadata");
     println!("  reimsbridge-windows clipboard-test");
     println!("  reimsbridge-windows ssh-test <username>");
     println!("  reimsbridge-windows mac-status <username>");
@@ -111,7 +112,7 @@ fn print_help() {
 
 fn run() -> Result<(), Box<dyn Error>> {
     println!("ReimsBridge v{}", env!("CARGO_PKG_VERSION"));
-    println!("M2.2C.2 - Native bidirectional clipboard synchronization");
+    println!("M2.3A - Native Windows clipboard metadata");
     println!();
 
     let mut args = env::args().skip(1);
@@ -127,6 +128,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             return Ok(());
         }
         "clipboard-check" => return clipboard::check(),
+        "clipboard-metadata" => return clipboard::check_metadata(),
         "clipboard-test" => return clipboard::self_test(),
         "ssh-test" | "send" | "receive" | "roundtrip-test" | "mac-status" | "mac-receive"
         | "mac-send" => {}
