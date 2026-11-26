@@ -27,6 +27,10 @@ final class LocalIPC: ObservableObject {
     
     private var listener: Int32 = -1
     private var timer: Timer?
+
+    private var clients: [Int32: IPCConnection] = [:]
+
+    private let maxClients = 4
     
     private var directory: String {
         NSHomeDirectory() + "/.reimsbridge"
@@ -51,7 +55,7 @@ final class LocalIPC: ObservableObject {
             status = "Listening"
             
             let pollTimer = Timer(
-                timeInterval: 0.2,
+                timeInterval: 0.05,
                 repeats: true
             ) { [weak self] _ in
                 Task { @MainActor in
@@ -73,6 +77,12 @@ final class LocalIPC: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
+
+        for fd in clients.keys {
+            Darwin.close(fd)
+        }
+
+        clients.removeAll()
         
         if listener >= 0 {
             Darwin.close(listener)
@@ -195,27 +205,61 @@ final class LocalIPC: ObservableObject {
         guard isRunning, listener >= 0 else {
             return
         }
-        
-        // Bound the amount of work performed per tick.
-        for _ in 0..<8 {
-            let client = Darwin.accept(listener, nil, nil)
-            
-            if client < 0 {
-                return
+
+        for fd in Array(clients.keys) {
+            guard let connection = clients[fd] else {
+                continue
             }
-            
+
+            switch connection.advance() {
+            case .pending:
+                continue
+
+            case .finished:
+                requestCount += 1
+                closeClient(fd)
+
+            case .failed:
+                closeClient(fd)
+            }
+        }
+
+        for _ in 0..<maxClients {
+            guard clients.count < maxClients else {
+                break
+            }
+
+            let client = Darwin.accept(
+                listener,
+                nil,
+                nil
+            )
+
+            if client < 0 {
+                break
+            }
+
             handleClient(client)
         }
     }
-    
+
+    private func closeClient(_ fd: Int32) {
+        clients.removeValue(forKey: fd)
+        Darwin.close(fd)
+    }
+
     private func handleClient(_ client: Int32) {
+        var accepted = false
+
         defer {
-            Darwin.close(client)
+            if !accepted {
+                Darwin.close(client)
+            }
         }
-        
+
         var uid: uid_t = 0
         var gid: gid_t = 0
-        
+
         guard getpeereid(
             client,
             &uid,
@@ -223,7 +267,7 @@ final class LocalIPC: ObservableObject {
         ) == 0, uid == getuid() else {
             return
         }
-        
+
         guard Darwin.fcntl(
             client,
             F_SETFL,
@@ -231,28 +275,21 @@ final class LocalIPC: ObservableObject {
         ) >= 0 else {
             return
         }
-        
+
         var noSigPipe: Int32 = 1
-        
-        guard Darwin.setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+
+        guard Darwin.setsockopt(
+            client,
+            SOL_SOCKET,
+            SO_NOSIGPIPE,
+            &noSigPipe,
+            socklen_t(MemoryLayout<Int32>.size)
+        ) == 0 else {
             return
         }
-        
-        let metadata = ClipboardService.inspect()
-        
-        let response =
-        """
-        {"protocol":1,"status":"ok","changeCount":\(metadata.changeCount),"hasPlainText":\(metadata.hasPlainText),"isExcluded":\(metadata.isExcluded)}
-        """ + "\n"
-        
-        let bytes = Array(response.utf8)
-        
-        let written = bytes.withUnsafeBytes { buffer in
-            Darwin.send(client, buffer.baseAddress, buffer.count, 0)
-        }
-        
-        if written == bytes.count {
-            requestCount += 1
-        }
+
+        clients[client] = IPCConnection(fd: client)
+
+        accepted = true
     }
 }
