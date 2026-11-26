@@ -20,6 +20,7 @@ enum ClipboardError: LocalizedError {
     case oversized
     case embeddedNul
     case changedDuringRead
+    case changedDuringWrite
     case writeFailed
     case testFailed
     
@@ -35,6 +36,8 @@ enum ClipboardError: LocalizedError {
             return "Clipboard contains embedded NUL"
         case .changedDuringRead:
             return "Clipboard changed during read"
+        case .changedDuringWrite:
+            return "Clipboard changed during write verification"
         case .writeFailed:
             return "Clipboard write failed"
         case .testFailed:
@@ -115,15 +118,15 @@ enum ClipboardService {
         to pasteboard: NSPasteboard = .general
     ) throws {
         try validate(text)
-        
+
         let item = NSPasteboardItem()
-        
+
         guard item.setString(text, forType: .string) else {
             throw ClipboardError.writeFailed
         }
-        
+
         pasteboard.clearContents()
-        
+
         guard pasteboard.writeObjects([item]) else {
             throw ClipboardError.writeFailed
         }
@@ -145,19 +148,81 @@ enum ClipboardService {
             "Trailing spaces \n"
         
         let initialCount = pasteboard.changeCount
-        
-        try writeText(fixture, to: pasteboard)
-        
+
+        guard let writtenCount = try writeTextChecked(
+            fixture,
+            to: pasteboard,
+            expectedChangeCount: initialCount
+        ) else {
+            throw ClipboardError.testFailed
+        }
+
+        guard writtenCount != initialCount,
+              pasteboard.changeCount == writtenCount else {
+            throw ClipboardError.testFailed
+        }
+
+        print("[CLIPBOARD] Initial change count: \(initialCount)")
+        print("[CLIPBOARD] Written change count: \(writtenCount)")
+        print("[CLIPBOARD] Observed change count: \(pasteboard.changeCount)")
+        print("[CLIPBOARD] Current-count write: PASS")
+        print("[CLIPBOARD] Write count attribution: PASS")
+
         let received = try readText(pasteboard)
-        
+
         guard received.utf8.elementsEqual(fixture.utf8) else {
             throw ClipboardError.testFailed
         }
-        
-        guard pasteboard.changeCount != initialCount else {
+
+        let rejected = try writeTextChecked(
+            "This must never reach the pasteboard",
+            to: pasteboard,
+            expectedChangeCount: initialCount
+        )
+
+        guard rejected == nil else {
             throw ClipboardError.testFailed
         }
-        
+
+        guard pasteboard.changeCount == writtenCount else {
+            throw ClipboardError.testFailed
+        }
+
+        let preservedAfterRejection = try readText(pasteboard)
+
+        guard preservedAfterRejection.utf8.elementsEqual(fixture.utf8) else {
+            throw ClipboardError.testFailed
+        }
+
+        print("[CLIPBOARD] Stale conditional write rejected: PASS")
+        print("[CLIPBOARD] Destination preservation: PASS")
+
+        let secondFixture = "Conditional macOS write 🚀\r\n"
+
+        guard let secondCount = try writeTextChecked(
+            secondFixture,
+            to: pasteboard,
+            expectedChangeCount: writtenCount
+        ) else {
+            throw ClipboardError.testFailed
+        }
+
+        guard secondCount != writtenCount,
+              pasteboard.changeCount == secondCount else {
+            throw ClipboardError.testFailed
+        }
+
+        let secondReceived = try readText(pasteboard)
+
+        guard secondReceived.utf8.elementsEqual(secondFixture.utf8) else {
+            throw ClipboardError.testFailed
+        }
+
+        print("[CLIPBOARD] Subsequent conditional write: PASS")
+
+        try writeText(fixture, to: pasteboard)
+
+        let countBeforeInvalidWrites = pasteboard.changeCount
         let invalidInputs = [
             "",
             "Hello\0World",
@@ -178,10 +243,14 @@ enum ClipboardService {
         }
         
         let preserved = try readText(pasteboard)
-        
-        guard preserved.utf8.elementsEqual(fixture.utf8) else {
+
+        guard preserved.utf8.elementsEqual(fixture.utf8),
+              pasteboard.changeCount == countBeforeInvalidWrites else {
             throw ClipboardError.testFailed
         }
+
+        print("[CLIPBOARD] Invalid write preservation: PASS")
+        print("[CLIPBOARD] All counter-aware write tests: PASS")
         
         for marker in excludedTypes {
             let item = NSPasteboardItem()
