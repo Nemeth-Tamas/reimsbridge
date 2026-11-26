@@ -11,6 +11,9 @@ import AppKit
 struct ContentView: View {
     @State private var changeCount: Int?
     @State private var hasPlainText = false
+    @State private var isExcluded = false
+    @State private var validationStatus = "Not tested"
+    @State private var selfTestStatus = "Not tested"
     
     var body: some View {
         Text("ReimsBridge v0.1.0")
@@ -33,8 +36,34 @@ struct ContentView: View {
             Text("Clipboard: Not inspected")
         }
         
+        if changeCount != nil {
+            Text(
+                isExcluded
+                    ? "Transfer eligibility: Excluded"
+                : hasPlainText
+                    ? "Transfer eligibility: Candidate"
+                : "Transfer eligibility: No text"
+            )
+        }
+        
         Button("Inspect Clipboard") {
             inspectClipboard()
+        }
+        
+        Divider()
+        
+        Text("Validation: \(validationStatus)")
+        
+        Button("Validate Clipboard Text") {
+            validateClipboard()
+        }
+        
+        Divider()
+        
+        Text("Self-test: \(selfTestStatus)")
+        
+        Button("Run Clipboard Self-Test") {
+            runSelfTest()
         }
         
         Divider()
@@ -46,12 +75,36 @@ struct ContentView: View {
     }
     
     private func inspectClipboard() {
-        let pasteboard = NSPasteboard.general
+        let metadata = ClipboardService.inspect()
         
-        changeCount = pasteboard.changeCount
+        changeCount = metadata.changeCount
+        hasPlainText = metadata.hasPlainText
+        isExcluded = metadata.isExcluded
+        validationStatus = "Not tested"
+    }
+    
+    private func validateClipboard() {
+        inspectClipboard()
         
-        hasPlainText = pasteboard.types?
-            .contains(.string) ?? false
+        do {
+            let text = try ClipboardService.readText()
+            
+            validationStatus =
+            "PASS (\(text.utf8.count ) bytes)"
+        } catch {
+            validationStatus = error.localizedDescription
+        }
+    }
+    
+    private func runSelfTest() {
+        do {
+            let bytes = try ClipboardService.selfTest()
+            
+            selfTestStatus = "PASS (\(bytes) bytes)"
+        } catch {
+            selfTestStatus =
+                "FAIL: \(error.localizedDescription)"
+        }
     }
 }
 
