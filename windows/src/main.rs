@@ -1,4 +1,6 @@
 mod clipboard;
+mod remote_clipboard;
+mod sync;
 
 use ssh2::{CheckResult, KnownHostFileKind, Session};
 use std::env;
@@ -72,25 +74,7 @@ fn connect(username: &str) -> Result<Session, Box<dyn Error>> {
     Ok(session)
 }
 
-fn run() -> Result<(), Box<dyn Error>> {
-    println!("ReimsBridge v{}", env!("CARGO_PKG_VERSION"));
-    println!("M1.2 - Native clipboard verification");
-    println!();
-
-    let argument = env::args().nth(1).ok_or(
-        "Usage: reimsbridge-windows \
-             <username|clipboard-check|clipboard-test>",
-    )?;
-
-    match argument.as_str() {
-        "clipboard-check" => return clipboard::check(),
-        "clipboard-test" => return clipboard::self_test(),
-        _ => {}
-    }
-
-    let username = argument;
-    let session = connect(&username)?;
-
+fn transport_test(session: &Session) -> Result<(), Box<dyn Error>> {
     let mut channel = session.channel_session()?;
 
     channel.exec("/usr/bin/whoami")?;
@@ -107,7 +91,62 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!("[SSH] Remote user: {}", output.trim());
     println!("[SSH] Transport test passed");
 
-    session.disconnect(None, "ReimsBridge test complete", None)?;
+    Ok(())
+}
+
+fn print_help() {
+    println!("Usage:");
+    println!("  reimsbridge-windows clipboard-check");
+    println!("  reimsbridge-windows clipboard-test");
+    println!("  reimsbridge-windows ssh-test <username>");
+    println!("  reimsbridge-windows send <username>");
+    println!("  reimsbridge-windows receive <username>");
+    println!("  reimsbridge-windows roundtrip-test <username>");
+}
+
+fn run() -> Result<(), Box<dyn Error>> {
+    println!("ReimsBridge v{}", env!("CARGO_PKG_VERSION"));
+    println!("M1.3 - Manual clipboard synchronization");
+    println!();
+
+    let mut args = env::args().skip(1);
+
+    let Some(command) = args.next() else {
+        print_help();
+        return Ok(());
+    };
+
+    match command.as_str() {
+        "help" | "--help" | "-h" => {
+            print_help();
+            return Ok(());
+        }
+        "clipboard-check" => return clipboard::check(),
+        "clipboard-test" => return clipboard::self_test(),
+        "ssh-test" | "send" | "receive" | "roundtrip-test" => {}
+        _ => {
+            print_help();
+            return Err("Unknown command".into());
+        }
+    }
+
+    let username = args.next().ok_or("Missing SSH username")?;
+
+    if args.next().is_some() {
+        return Err("Unexpected command-line argument".into());
+    }
+
+    let session = connect(&username)?;
+
+    match command.as_str() {
+        "ssh-test" => transport_test(&session)?,
+        "send" => sync::send(&session)?,
+        "receive" => sync::receive(&session)?,
+        "roundtrip-test" => sync::roundtrip_test(&session)?,
+        _ => unreachable!(),
+    }
+
+    session.disconnect(None, "ReimsBridge session complete", None)?;
 
     Ok(())
 }
