@@ -114,7 +114,7 @@ fn print_help() {
 
 fn run() -> Result<(), Box<dyn Error>> {
     println!("ReimsBridge v{}", env!("CARGO_PKG_VERSION"));
-    println!("M2.3B - Synchronization decision engine");
+    println!("M2.3C.1A - Counter-aware Windows clipboard writes");
     println!();
 
     let mut args = env::args().skip(1);

@@ -1,6 +1,6 @@
 use crate::validation::validate_text;
 use clipboard_win::{
-    formats, get_clipboard, is_format_avail, register_format, seq_num, set_clipboard,
+    Clipboard, Setter, formats, get_clipboard, is_format_avail, register_format, seq_num,
 };
 use std::error::Error;
 
@@ -85,12 +85,31 @@ pub fn read_text() -> Result<String, Box<dyn Error>> {
     Ok(text)
 }
 
-pub fn write_text(text: &str) -> Result<(), Box<dyn Error>> {
+pub fn write_text_checked(
+    text: &str,
+    expected_sequence: Option<u32>,
+) -> Result<Option<u32>, Box<dyn Error>> {
     validate_text(text)?;
 
-    set_clipboard(formats::Unicode, text)?;
+    let guard = Clipboard::new_attempts(10)?;
 
-    Ok(())
+    let before = sequence_number()?;
+
+    if expected_sequence.is_some_and(|expected| expected != before) {
+        return Ok(None);
+    }
+
+    formats::Unicode.write_clipboard(&text)?;
+
+    let written_sequence = sequence_number()?;
+
+    drop(guard);
+
+    Ok(Some(written_sequence))
+}
+
+pub fn write_text(text: &str) -> Result<(), Box<dyn Error>> {
+    write_text_checked(text, None).map(|_| ())
 }
 
 pub fn check() -> Result<(), Box<dyn Error>> {
@@ -127,6 +146,79 @@ pub fn self_test() -> Result<(), Box<dyn Error>> {
     println!("[CLIPBOARD] Written bytes: {}", FIXTURE.len());
     println!("[CLIPBOARD] Received bytes: {}", received.len());
     println!("[CLIPBOARD] Exact Unicode round-trip: PASS");
+
+    println!();
+    println!("[CLIPBOARD] Testing conditional writes");
+
+    const SECOND_FIXTURE: &str = "ReimsBridge conditional write test 🚀\r\n";
+
+    let expected_sequence = sequence_number()?;
+
+    let written_sequence = write_text_checked(SECOND_FIXTURE, Some(expected_sequence))?
+        .ok_or("Current-sequence write was unexpectedly rejected")?;
+
+    let observed_sequence = sequence_number()?;
+
+    println!("[CLIPBOARD] Initial sequence: {expected_sequence}");
+    println!("[CLIPBOARD] Written sequence: {written_sequence}");
+    println!("[CLIPBOARD] Observed sequence: {observed_sequence}");
+
+    if written_sequence == expected_sequence {
+        return Err("Clipboard write did not advance sequence".into());
+    }
+
+    if written_sequence != observed_sequence {
+        return Err("Clipboard sequence changed after lock release".into());
+    }
+
+    println!("[CLIPBOARD] Current-sequence write: PASS");
+    println!("[CLIPBOARD] Write sequence attribution: PASS");
+
+    let before_rejection = sequence_number()?;
+
+    let rejected = write_text_checked(
+        "This must never reach the clipboard",
+        Some(expected_sequence),
+    )?;
+
+    if rejected.is_some() {
+        return Err("Stale conditional write was accepted".into());
+    }
+
+    if sequence_number()? != before_rejection {
+        return Err("Rejected write modified clipboard sequence".into());
+    }
+
+    println!("[CLIPBOARD] Stale conditional write rejected: PASS");
+
+    let received = read_text()?;
+
+    if received.as_bytes() != SECOND_FIXTURE.as_bytes() {
+        return Err("Rejected write modified clipboard contents".into());
+    }
+
+    println!("[CLIPBOARD] Destination preservation: PASS");
+
+    let before_invalid = sequence_number()?;
+
+    for invalid in ["", "a\0b"] {
+        if write_text_checked(invalid, None).is_ok() {
+            return Err("Invalid conditional write was accepted".into());
+        }
+    }
+
+    if sequence_number()? != before_invalid {
+        return Err("Invalid write modified clipboard sequence".into());
+    }
+
+    let received = read_text()?;
+
+    if received.as_bytes() != SECOND_FIXTURE.as_bytes() {
+        return Err("Invalid write modified clipboard contents".into());
+    }
+
+    println!("[CLIPBOARD] Invalid write preservation: PASS");
+    println!("[CLIPBOARD] All counter-aware write tests: PASS");
 
     Ok(())
 }
