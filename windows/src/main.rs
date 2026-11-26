@@ -1,6 +1,7 @@
 mod clipboard;
 mod remote_clipboard;
 mod sync;
+mod validation;
 
 use ssh2::{CheckResult, KnownHostFileKind, Session};
 use std::env;
@@ -106,7 +107,7 @@ fn print_help() {
 
 fn run() -> Result<(), Box<dyn Error>> {
     println!("ReimsBridge v{}", env!("CARGO_PKG_VERSION"));
-    println!("M1.3 - Manual clipboard synchronization");
+    println!("M1.4 - Validated clipboard synchronization");
     println!();
 
     let mut args = env::args().skip(1);

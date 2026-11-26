@@ -1,4 +1,4 @@
-use crate::clipboard::MAX_CLIPBOARD_BYTES;
+use crate::validation::{MAX_CLIPBOARD_BYTES, decode_text, validate_text};
 use ssh2::{Channel, ExtendedData, Session};
 use std::error::Error;
 use std::io::{Read, Write};
@@ -45,17 +45,7 @@ fn read_reply(mut channel: Channel) -> Result<Vec<u8>, Box<dyn Error>> {
 }
 
 pub fn write_text(session: &Session, text: &str) -> Result<(), Box<dyn Error>> {
-    if text.len() > MAX_CLIPBOARD_BYTES {
-        return Err("Clipboard exceeds size limit".into());
-    }
-
-    if text.is_empty() {
-        return Err("Refusing to transfer empty clipboard".into());
-    }
-
-    if text.contains('\0') {
-        return Err("Clipboard contains embedded NUL".into());
-    }
+    validate_text(text)?;
 
     let mut channel = open_channel(session, COPY_COMMAND)?;
 
@@ -79,15 +69,6 @@ pub fn read_text(session: &Session) -> Result<String, Box<dyn Error>> {
     channel.send_eof()?;
 
     let output = read_reply(channel)?;
-    let text = String::from_utf8(output)?;
 
-    if text.is_empty() {
-        return Err("Remote clipboard contains no text".into());
-    }
-
-    if text.contains('\0') {
-        return Err("Remote clipboard contains embedded NUL".into());
-    }
-
-    Ok(text)
+    decode_text(output)
 }
