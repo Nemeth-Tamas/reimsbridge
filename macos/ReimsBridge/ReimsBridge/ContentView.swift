@@ -9,6 +9,7 @@ import SwiftUI
 import AppKit
 
 struct ContentView: View {
+    @ObservedObject private var ipc = LocalIPC.shared
     @State private var changeCount: Int?
     @State private var hasPlainText = false
     @State private var isExcluded = false
@@ -21,6 +22,23 @@ struct ContentView: View {
         
         Text("Connection: Not connected")
         Text("Synchronization: Disabled")
+        
+        Divider()
+        
+        Text("IPC: \(ipc.status)")
+        Text("IPC requests: \(ipc.requestCount)")
+        
+        Button(
+            ipc.isRunning
+                ? "Stop IPC Service"
+                : "Start IPC Service"
+        ) {
+            if ipc.isRunning {
+                ipc.stop()
+            } else {
+                ipc.start()
+            }
+        }
         
         Divider()
         
@@ -69,6 +87,7 @@ struct ContentView: View {
         Divider()
         
         Button("Quit ReimsBridge") {
+            ipc.stop()
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
