@@ -165,6 +165,57 @@ pub fn receive(session: &Session) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn build_write_request(text: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    validation::validate_text(text)?;
+
+    let mut request = format!("write {}\n", text.len()).into_bytes();
+
+    request.extend_from_slice(text.as_bytes());
+    request.push(0);
+
+    Ok(request)
+}
+
+fn parse_write_response(response: &[u8]) -> Result<(), Box<dyn Error>> {
+    match response {
+        b"OK\n" => Ok(()),
+
+        b"ERR NO_TEXT\n" => Err("macOS rejected empty clipboard text".into()),
+
+        b"ERR OVERSIZED\n" => Err("macOS rejected oversized clipboard text".into()),
+
+        b"ERR INVALID_TEXT\n" => Err("macOS rejected invalid clipboard text".into()),
+
+        b"ERR BAD_REQUEST\n" => Err("macOS rejected IPC write request".into()),
+
+        b"ERR WRITE_FAILED\n" => Err("Native macOS clipboard write failed".into()),
+
+        _ => Err("Invalid IPC write acknowledgement".into()),
+    }
+}
+
+pub fn write_text(session: &Session, text: &str) -> Result<(), Box<dyn Error>> {
+    let request = build_write_request(text)?;
+
+    let response = query(session, &request, MAX_RESPONSE_BYTES)?;
+
+    parse_write_response(&response)
+}
+
+pub fn send(session: &Session) -> Result<(), Box<dyn Error>> {
+    println!("[IPC] Native Windows -> macOS");
+
+    let text = clipboard::read_text()?;
+
+    println!("[IPC] Transferring {} bytes", text.len());
+
+    write_text(session, &text)?;
+
+    println!("[IPC] Native clipboard transfer: PASS");
+
+    Ok(())
+}
+
 pub fn check(session: &Session) -> Result<(), Box<dyn Error>> {
     println!("[IPC] Querying native macOS application");
 
@@ -291,5 +342,67 @@ mod tests {
         let response = format!("OK {}\n", validation::MAX_CLIPBOARD_BYTES + 1);
 
         assert!(parse_read(response.into_bytes()).is_err());
+    }
+
+    #[test]
+    fn valid_write_request() {
+        let request = build_write_request("Hello").unwrap();
+
+        assert_eq!(request, b"write 5\nHello\0");
+    }
+
+    #[test]
+    fn unicode_write_request() {
+        let request = build_write_request("🚀").unwrap();
+
+        assert_eq!(request, b"write 4\n\xf0\x9f\x9a\x80\0");
+    }
+
+    #[test]
+    fn empty_write_request_rejected() {
+        assert!(build_write_request("").is_err());
+    }
+
+    #[test]
+    fn embedded_nul_write_request_rejected() {
+        assert!(build_write_request("a\0b").is_err());
+    }
+
+    #[test]
+    fn maximum_write_request_accepted() {
+        let text = "x".repeat(validation::MAX_CLIPBOARD_BYTES);
+
+        let request = build_write_request(&text).unwrap();
+
+        assert!(request.starts_with(b"write 1048576\n"));
+        assert_eq!(request.last(), Some(&0));
+        assert_eq!(
+            request.len(),
+            validation::MAX_CLIPBOARD_BYTES + b"write 1048576\n".len() + 1
+        );
+    }
+
+    #[test]
+    fn oversized_write_request_rejected() {
+        let text = "x".repeat(validation::MAX_CLIPBOARD_BYTES + 1);
+
+        assert!(build_write_request(&text).is_err());
+    }
+
+    #[test]
+    fn valid_write_acknowledgement() {
+        assert!(parse_write_response(b"OK\n").is_ok());
+    }
+
+    #[test]
+    fn failed_write_acknowledgement() {
+        assert!(parse_write_response(b"ERR WRITE_FAILED\n").is_err());
+    }
+
+    #[test]
+    fn malformed_write_acknowledgement() {
+        for response in [b"".as_slice(), b"OK", b"OK\nextra", b"UNKNOWN\n"] {
+            assert!(parse_write_response(response).is_err());
+        }
     }
 }
