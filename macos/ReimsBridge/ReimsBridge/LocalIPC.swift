@@ -27,6 +27,7 @@ final class LocalIPC: ObservableObject {
     
     private var listener: Int32 = -1
     private var timer: Timer?
+    private var activity: (any NSObjectProtocol)?
 
     private var clients: [Int32: IPCConnection] = [:]
 
@@ -53,6 +54,11 @@ final class LocalIPC: ObservableObject {
             requestCount = 0
             isRunning = true
             status = "Listening"
+
+            activity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep,
+                reason: "ReimsBridge local IPC service"
+            )
             
             let pollTimer = Timer(
                 timeInterval: 0.05,
@@ -77,6 +83,11 @@ final class LocalIPC: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
+
+        if let activity {
+            ProcessInfo.processInfo.endActivity(activity)
+            self.activity = nil
+        }
 
         for fd in clients.keys {
             Darwin.close(fd)

@@ -19,7 +19,7 @@ final class IPCConnection {
     private let fd: Int32
 
     private let deadline =
-        ProcessInfo.processInfo.systemUptime + 4.0
+        ProcessInfo.processInfo.systemUptime + 10.0
 
     private var request = Data()
     private var response: Data?
@@ -27,6 +27,7 @@ final class IPCConnection {
 
     private static let maxRequestBytes = 16
     private static let writeChunkBytes = 64 * 1024
+    private static let maxWritesPerTick = 4
 
     init(fd: Int32) {
         self.fd = fd
@@ -49,7 +50,24 @@ final class IPCConnection {
             }
         }
 
-        return sendResponse()
+        for _ in 0..<Self.maxWritesPerTick {
+            let previousSentBytes = sentBytes
+
+            switch sendResponse() {
+            case .finished:
+                return .finished
+
+            case .failed:
+                return .failed
+
+            case .pending:
+                if sentBytes == previousSentBytes {
+                    return .pending
+                }
+            }
+        }
+
+        return .pending
     }
 
     private func receiveRequest() -> Progress {
