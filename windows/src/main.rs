@@ -110,6 +110,7 @@ fn print_help() {
     println!("  reimsbridge-windows mac-send <username>");
     println!("  reimsbridge-windows mac-conditional-test <username>");
     println!("  reimsbridge-windows watch <username>");
+    println!("  reimsbridge-windows watch-test <username>");
     println!("  reimsbridge-windows send <username>");
     println!("  reimsbridge-windows receive <username>");
     println!("  reimsbridge-windows roundtrip-test <username>");
@@ -117,7 +118,7 @@ fn print_help() {
 
 fn run() -> Result<(), Box<dyn Error>> {
     println!("ReimsBridge v{}", env!("CARGO_PKG_VERSION"));
-    println!("M2.3C.3 - Automatic bidirectional clipboard synchronization");
+    println!("M2.3D - Automatic synchronization acceptance");
     println!();
 
     let mut args = env::args().skip(1);
@@ -143,7 +144,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         | "mac-receive"
         | "mac-send"
         | "mac-conditional-test"
-        | "watch" => {}
+        | "watch"
+        | "watch-test" => {}
         _ => {
             print_help();
             return Err("Unknown command".into());
@@ -165,6 +167,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         "mac-send" => mac_ipc::send(&session)?,
         "mac-conditional-test" => mac_ipc::test_checked_write(&session)?,
         "watch" => watch::run(&session)?,
+        "watch-test" => watch::test(&session)?,
         "send" => sync::send(&session)?,
         "receive" => sync::receive(&session)?,
         "roundtrip-test" => sync::roundtrip_test(&session)?,
