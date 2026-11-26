@@ -20,13 +20,15 @@ struct ContentView: View {
         Text("ReimsBridge v0.1.0")
             .font(.headline)
         
-        Text("Connection: Not connected")
-        Text("Synchronization: Disabled")
+        Text(ipc.isRunning
+            ? "Service available to Windows"
+            : "Service unavailable")
+        Text("Synchronization controlled by Windows")
         
         Divider()
         
         Text("IPC: \(ipc.status)")
-        Text("IPC requests: \(ipc.requestCount)")
+        Text("Completed IPC requests: \(ipc.requestCount)")
         
         Button(
             ipc.isRunning
@@ -56,12 +58,16 @@ struct ContentView: View {
         
         if changeCount != nil {
             Text(
-                isExcluded
-                    ? "Transfer eligibility: Excluded"
-                : hasPlainText
+                hasPlainText
                     ? "Transfer eligibility: Candidate"
-                : "Transfer eligibility: No text"
+                    : "Transfer eligibility: No text"
             )
+        }
+        
+        if changeCount != nil {
+            Text(isExcluded
+                ? "Privacy marker detected (transfer allowed)"
+                : "No known privacy markers detected")
         }
         
         Button("Inspect Clipboard") {
