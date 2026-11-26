@@ -25,7 +25,7 @@ final class IPCConnection {
     private var response: Data?
     private var sentBytes = 0
 
-    private static let maxRequestBytes = 16
+    private static let maxRequestBytes = 64
     private static let readChunkBytes = 64 * 1024
     private static let writeChunkBytes = 64 * 1024
     private static let maxReadsPerTick = 4
@@ -175,13 +175,44 @@ final class IPCConnection {
             )
         }
 
-        guard header.hasPrefix("write ") else {
+        let fields = header.split(
+            separator: " ",
+            omittingEmptySubsequences: false
+        )
+
+        let expectedChangeCount: Int?
+        let sizeString: Substring
+
+        if fields.count == 2,
+           fields[0] == "write" {
+            expectedChangeCount = nil
+            sizeString = fields[1]
+        } else if fields.count == 3,
+                  fields[0] == "write-if" {
+            let counterString = fields[1]
+
+            let digits = counterString.first == "-"
+                ? counterString.dropFirst()
+                : counterString
+
+            guard !digits.isEmpty,
+                  digits.utf8.allSatisfy({
+                      (48...57).contains($0)
+                  }),
+                  let counter = Int(counterString)
+            else {
+                return finishRequest(
+                    Data("ERR BAD_REQUEST\n".utf8)
+                )
+            }
+
+            expectedChangeCount = counter
+            sizeString = fields[2]
+        } else {
             return finishRequest(
                 Data("ERR BAD_REQUEST\n".utf8)
             )
         }
-
-        let sizeString = header.dropFirst(6)
 
         guard !sizeString.isEmpty,
               sizeString.utf8.allSatisfy({
@@ -226,7 +257,10 @@ final class IPCConnection {
         )
 
         return finishRequest(
-            writeResponse(payload)
+            writeResponse(
+                payload,
+                expectedChangeCount: expectedChangeCount
+            )
         )
     }
 
@@ -240,7 +274,8 @@ final class IPCConnection {
     }
 
     private func writeResponse(
-        _ payload: Data
+        _ payload: Data,
+        expectedChangeCount: Int?
     ) -> Data {
         let text = String(
             decoding: payload,
@@ -252,7 +287,20 @@ final class IPCConnection {
         }
 
         do {
-            try ClipboardService.writeText(text)
+            guard let writtenChangeCount =
+                try ClipboardService.writeTextChecked(
+                    text,
+                    expectedChangeCount: expectedChangeCount
+                )
+            else {
+                return Data("ERR STALE\n".utf8)
+            }
+
+            if expectedChangeCount != nil {
+                return Data(
+                    "OK \(writtenChangeCount)\n".utf8
+                )
+            }
 
             return Data("OK\n".utf8)
         } catch ClipboardError.noText {
