@@ -2,6 +2,8 @@ mod clipboard;
 mod mac_ipc;
 mod remote_clipboard;
 mod sync;
+#[cfg(test)]
+mod sync_engine;
 mod validation;
 
 use ssh2::{CheckResult, KnownHostFileKind, Session};
@@ -112,7 +114,7 @@ fn print_help() {
 
 fn run() -> Result<(), Box<dyn Error>> {
     println!("ReimsBridge v{}", env!("CARGO_PKG_VERSION"));
-    println!("M2.3A - Native Windows clipboard metadata");
+    println!("M2.3B - Synchronization decision engine");
     println!();
 
     let mut args = env::args().skip(1);

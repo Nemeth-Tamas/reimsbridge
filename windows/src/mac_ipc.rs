@@ -227,7 +227,7 @@ pub fn check(session: &Session) -> Result<(), Box<dyn Error>> {
     println!("[IPC] Plain text available: {}", status.has_plain_text);
     println!("[IPC] Content excluded: {}", status.is_excluded);
 
-    let eligible = status.has_plain_text && !status.is_excluded;
+    let eligible = status.has_plain_text;
 
     println!("[IPC] Transfer candidate: {eligible}");
     println!("[IPC] Native macOS communication: PASS");
