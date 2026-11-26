@@ -107,6 +107,7 @@ fn print_help() {
     println!("  reimsbridge-windows mac-status <username>");
     println!("  reimsbridge-windows mac-receive <username>");
     println!("  reimsbridge-windows mac-send <username>");
+    println!("  reimsbridge-windows mac-conditional-test <username>");
     println!("  reimsbridge-windows send <username>");
     println!("  reimsbridge-windows receive <username>");
     println!("  reimsbridge-windows roundtrip-test <username>");
@@ -114,7 +115,7 @@ fn print_help() {
 
 fn run() -> Result<(), Box<dyn Error>> {
     println!("ReimsBridge v{}", env!("CARGO_PKG_VERSION"));
-    println!("M2.3C.1A - Counter-aware Windows clipboard writes");
+    println!("M2.3C.2B - Conditional native clipboard IPC");
     println!();
 
     let mut args = env::args().skip(1);
@@ -132,8 +133,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         "clipboard-check" => return clipboard::check(),
         "clipboard-metadata" => return clipboard::check_metadata(),
         "clipboard-test" => return clipboard::self_test(),
-        "ssh-test" | "send" | "receive" | "roundtrip-test" | "mac-status" | "mac-receive"
-        | "mac-send" => {}
+        "ssh-test"
+        | "send"
+        | "receive"
+        | "roundtrip-test"
+        | "mac-status"
+        | "mac-receive"
+        | "mac-send"
+        | "mac-conditional-test" => {}
         _ => {
             print_help();
             return Err("Unknown command".into());
@@ -153,6 +160,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         "mac-status" => mac_ipc::check(&session)?,
         "mac-receive" => mac_ipc::receive(&session)?,
         "mac-send" => mac_ipc::send(&session)?,
+        "mac-conditional-test" => mac_ipc::test_checked_write(&session)?,
         "send" => sync::send(&session)?,
         "receive" => sync::receive(&session)?,
         "roundtrip-test" => sync::roundtrip_test(&session)?,

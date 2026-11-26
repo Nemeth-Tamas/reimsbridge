@@ -202,6 +202,221 @@ pub fn write_text(session: &Session, text: &str) -> Result<(), Box<dyn Error>> {
     parse_write_response(&response)
 }
 
+fn build_checked_write_request(
+    text: &str,
+    expected_change_count: i64,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    validation::validate_text(text)?;
+
+    let mut request = format!("write-if {expected_change_count} {}\n", text.len()).into_bytes();
+
+    request.extend_from_slice(text.as_bytes());
+    request.push(0);
+
+    Ok(request)
+}
+
+fn parse_checked_write_response(response: &[u8]) -> Result<Option<i64>, Box<dyn Error>> {
+    match response {
+        b"ERR STALE\n" => return Ok(None),
+
+        b"ERR NO_TEXT\n" => {
+            return Err("macOS rejected empty clipboard text".into());
+        }
+
+        b"ERR OVERSIZED\n" => {
+            return Err("macOS rejected oversized clipboard text".into());
+        }
+
+        b"ERR INVALID_TEXT\n" => {
+            return Err("macOS rejected invalid clipboard text".into());
+        }
+
+        b"ERR BAD_REQUEST\n" => {
+            return Err("macOS rejected conditional IPC write request".into());
+        }
+
+        b"ERR WRITE_FAILED\n" => {
+            return Err("Native macOS clipboard write failed or was not verified".into());
+        }
+
+        _ => {}
+    }
+
+    if response.len() > MAX_HEADER_BYTES {
+        return Err("IPC acknowledgement exceeds size limit".into());
+    }
+
+    let counter_bytes = response
+        .strip_prefix(b"OK ")
+        .and_then(|value| value.strip_suffix(b"\n"))
+        .ok_or("Invalid conditional IPC write acknowledgement")?;
+
+    let digits = counter_bytes.strip_prefix(b"-").unwrap_or(counter_bytes);
+
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return Err("Invalid IPC acknowledgement counter".into());
+    }
+
+    let counter = std::str::from_utf8(counter_bytes)?
+        .parse::<i64>()
+        .map_err(|_| "Invalid IPC acknowledgement counter")?;
+
+    Ok(Some(counter))
+}
+
+pub fn write_text_checked(
+    session: &Session,
+    text: &str,
+    expected_change_count: i64,
+) -> Result<Option<i64>, Box<dyn Error>> {
+    let request = build_checked_write_request(text, expected_change_count)?;
+
+    let response = query(session, &request, MAX_RESPONSE_BYTES)?;
+
+    parse_checked_write_response(&response)
+}
+
+pub fn test_checked_write(session: &Session) -> Result<(), Box<dyn Error>> {
+    println!("[IPC] Testing conditional native clipboard writes");
+
+    let fixture = concat!(
+        "ReimsBridge M2.3C.2B\r\n",
+        "Árvíztűrő tükörfúrógép 🚀 🦀 🍎\n",
+        "\tTabbed text\n",
+        "    Indented code\n",
+        "Trailing spaces  \n",
+    );
+
+    clipboard::write_text(fixture)?;
+
+    let source = clipboard::read_text()?;
+
+    if source.as_bytes() != fixture.as_bytes() {
+        return Err("Windows fixture verification failed".into());
+    }
+
+    println!("[IPC] Windows source fixture: PASS");
+
+    let initial = get_status(session)?.change_count;
+
+    println!("[IPC] Initial macOS change count: {initial}");
+
+    let written =
+        write_text_checked(session, &source, initial)?.ok_or("Unexpected stale destination")?;
+
+    println!("[IPC] Written macOS change count: {written}");
+
+    if written == initial || get_status(session)?.change_count != written {
+        return Err("Conditional write counter verification failed".into());
+    }
+
+    if read_text(session)?.as_bytes() != source.as_bytes() {
+        return Err("Conditional write payload verification failed".into());
+    }
+
+    println!("[IPC] Current-count conditional write: PASS");
+    println!("[IPC] Verified acknowledgement counter: PASS");
+    println!("[IPC] Exact Unicode transfer: PASS");
+
+    if write_text_checked(session, "Stale replacement", initial)?.is_some() {
+        return Err("Stale conditional write was accepted".into());
+    }
+
+    if get_status(session)?.change_count != written
+        || read_text(session)?.as_bytes() != source.as_bytes()
+    {
+        return Err("Stale write modified destination".into());
+    }
+
+    println!("[IPC] Stale conditional write rejected: PASS");
+    println!("[IPC] Destination preservation: PASS");
+
+    for invalid in ["", "Embedded\0NUL"] {
+        if write_text_checked(session, invalid, written).is_ok() {
+            return Err("Invalid conditional write was accepted".into());
+        }
+    }
+
+    let oversized = "x".repeat(validation::MAX_CLIPBOARD_BYTES + 1);
+
+    if write_text_checked(session, &oversized, written).is_ok() {
+        return Err("Oversized conditional write was accepted".into());
+    }
+
+    if get_status(session)?.change_count != written
+        || read_text(session)?.as_bytes() != source.as_bytes()
+    {
+        return Err("Invalid write modified destination".into());
+    }
+
+    println!("[IPC] Invalid payload rejection: PASS");
+    println!("[IPC] Invalid write preservation: PASS");
+
+    let large = "0123456789ABCDEF".repeat(validation::MAX_CLIPBOARD_BYTES / 16);
+
+    clipboard::write_text(&large)?;
+
+    let large_source = clipboard::read_text()?;
+
+    if large_source.as_bytes() != large.as_bytes() {
+        return Err("Maximum Windows fixture verification failed".into());
+    }
+
+    println!("[IPC] Transferring {} bytes", large_source.len());
+
+    let started = std::time::Instant::now();
+
+    let large_counter = write_text_checked(session, &large_source, written)?
+        .ok_or("Unexpected stale destination during maximum transfer")?;
+
+    println!("[IPC] Upload elapsed: {:?}", started.elapsed());
+
+    if large_counter == written || get_status(session)?.change_count != large_counter {
+        return Err("Maximum write counter verification failed".into());
+    }
+
+    let started = std::time::Instant::now();
+
+    let received = read_text(session)?;
+
+    println!("[IPC] Download elapsed: {:?}", started.elapsed());
+
+    if received.as_bytes() != large_source.as_bytes() {
+        return Err("Maximum conditional payload mismatch".into());
+    }
+
+    println!("[IPC] Maximum conditional transfer: PASS");
+    println!("[IPC] Maximum payload exact readback: PASS");
+
+    if write_text_checked(session, "Old counter", written)?.is_some() {
+        return Err("Previous counter was incorrectly accepted".into());
+    }
+
+    if get_status(session)?.change_count != large_counter
+        || read_text(session)?.as_bytes() != large_source.as_bytes()
+    {
+        return Err("Stale write modified maximum payload".into());
+    }
+
+    println!("[IPC] Stale rejection after maximum write: PASS");
+
+    let final_fixture = "ReimsBridge M2.3C.2B - PASS";
+
+    write_text(session, final_fixture)?;
+
+    if read_text(session)? != final_fixture {
+        return Err("Legacy write compatibility failed".into());
+    }
+
+    clipboard::write_text(final_fixture)?;
+
+    println!("[IPC] Legacy unconditional write: PASS");
+    println!("[IPC] All conditional IPC tests: PASS");
+
+    Ok(())
+}
+
 pub fn send(session: &Session) -> Result<(), Box<dyn Error>> {
     println!("[IPC] Native Windows -> macOS");
 
@@ -342,6 +557,155 @@ mod tests {
         let response = format!("OK {}\n", validation::MAX_CLIPBOARD_BYTES + 1);
 
         assert!(parse_read(response.into_bytes()).is_err());
+    }
+
+    #[test]
+    fn valid_checked_write_request() {
+        let request = build_checked_write_request("Hello", 42).unwrap();
+
+        assert_eq!(request, b"write-if 42 5\nHello\0");
+    }
+
+    #[test]
+    fn unicode_checked_write_request() {
+        let request = build_checked_write_request("🚀", 42).unwrap();
+
+        assert_eq!(request, b"write-if 42 4\n\xf0\x9f\x9a\x80\0");
+    }
+
+    #[test]
+    fn signed_checked_write_counter() {
+        let request = build_checked_write_request("x", i64::MIN).unwrap();
+
+        assert_eq!(request, b"write-if -9223372036854775808 1\nx\0");
+    }
+
+    #[test]
+    fn maximum_checked_write_request() {
+        let text = "x".repeat(validation::MAX_CLIPBOARD_BYTES);
+
+        let request = build_checked_write_request(&text, i64::MAX).unwrap();
+
+        let header = b"write-if 9223372036854775807 1048576\n";
+
+        assert!(request.starts_with(header));
+        assert_eq!(request.last(), Some(&0));
+
+        assert_eq!(
+            request.len(),
+            header.len() + validation::MAX_CLIPBOARD_BYTES + 1
+        );
+    }
+
+    #[test]
+    fn empty_checked_write_rejected() {
+        assert!(build_checked_write_request("", 42).is_err());
+    }
+
+    #[test]
+    fn nul_checked_write_rejected() {
+        assert!(build_checked_write_request("a\0b", 42).is_err());
+    }
+
+    #[test]
+    fn oversized_checked_write_rejected() {
+        let text = "x".repeat(validation::MAX_CLIPBOARD_BYTES + 1);
+
+        assert!(build_checked_write_request(&text, 42).is_err());
+    }
+
+    #[test]
+    fn valid_checked_write_acknowledgement() {
+        assert_eq!(parse_checked_write_response(b"OK 43\n").unwrap(), Some(43));
+    }
+
+    #[test]
+    fn zero_checked_write_acknowledgement() {
+        assert_eq!(parse_checked_write_response(b"OK 0\n").unwrap(), Some(0));
+    }
+
+    #[test]
+    fn signed_checked_write_acknowledgement() {
+        assert_eq!(
+            parse_checked_write_response(b"OK -9223372036854775808\n").unwrap(),
+            Some(i64::MIN)
+        );
+
+        assert_eq!(
+            parse_checked_write_response(b"OK 9223372036854775807\n").unwrap(),
+            Some(i64::MAX)
+        );
+    }
+
+    #[test]
+    fn stale_checked_write_acknowledgement() {
+        assert_eq!(parse_checked_write_response(b"ERR STALE\n").unwrap(), None);
+    }
+
+    #[test]
+    fn missing_checked_write_counter_rejected() {
+        for response in [b"".as_slice(), b"OK", b"OK\n", b"OK \n", b"OK 43"] {
+            assert!(parse_checked_write_response(response).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_checked_write_counter_rejected() {
+        for response in [
+            b"OK abc\n".as_slice(),
+            b"OK +43\n",
+            b"OK --43\n",
+            b"OK -\n",
+            b"OK  43\n",
+            b"OK 43 \n",
+            b"OK 4.3\n",
+            b"OK \xff\n",
+        ] {
+            assert!(parse_checked_write_response(response).is_err());
+        }
+    }
+
+    #[test]
+    fn overflow_checked_write_counter_rejected() {
+        for response in [
+            b"OK 9223372036854775808\n".as_slice(),
+            b"OK -9223372036854775809\n",
+        ] {
+            assert!(parse_checked_write_response(response).is_err());
+        }
+    }
+
+    #[test]
+    fn trailing_checked_write_bytes_rejected() {
+        for response in [
+            b"OK 43\nextra".as_slice(),
+            b"OK 43\n\n",
+            b"ERR STALE\nextra",
+            b"ERR STALE",
+        ] {
+            assert!(parse_checked_write_response(response).is_err());
+        }
+    }
+
+    #[test]
+    fn failed_checked_write_acknowledgement() {
+        for response in [
+            b"ERR NO_TEXT\n".as_slice(),
+            b"ERR OVERSIZED\n",
+            b"ERR INVALID_TEXT\n",
+            b"ERR BAD_REQUEST\n",
+            b"ERR WRITE_FAILED\n",
+            b"ERR UNKNOWN\n",
+        ] {
+            assert!(parse_checked_write_response(response).is_err());
+        }
+    }
+
+    #[test]
+    fn oversized_checked_acknowledgement_rejected() {
+        let response = format!("OK {}\n", "0".repeat(MAX_HEADER_BYTES));
+
+        assert!(parse_checked_write_response(response.as_bytes()).is_err());
     }
 
     #[test]
