@@ -1,0 +1,8 @@
+[package]
+name = "reimsbridge-windows"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rpassword = "7.5.5"
+ssh2 = { version = "0.9.7", features = ["openssl-on-win32", "vendored-openssl"] }

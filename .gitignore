@@ -1,0 +1,33 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+*.pdb
+
+# macOS
+.DS_Store
+
+# Xcode
+DerivedData/
+build/
+xcuserdata/
+*.xcuserstate
+
+# IDEs
+.vscode/
+.idea/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.local.toml
+*.local.json
+*.pem
+*.key
+
+# Logs
+*.log
+
+# Windows
+Thumbs.db
+Desktop.ini
