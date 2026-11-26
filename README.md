@@ -6,20 +6,30 @@ host and a macOS guest running under Reims vGPU/QEMU.
 ## Architecture
 
 - Windows companion written in Rust.
-- Planned macOS companion written in Swift and SwiftUI.
+- Native macOS menu bar companion written in Swift and SwiftUI.
 - Authenticated SSH transport.
+- Private Unix-domain socket for native macOS clipboard IPC.
 - No additional network ports or external services.
 - No Electron or unnecessary application frameworks.
 
 ## Current features
 
-- Manual bidirectional plain-text clipboard synchronization.
-- Native Windows Unicode clipboard access.
-- UTF-8 transport over SSH.
-- Password authentication.
-- SSH host-key verification.
+- Automatic bidirectional plain-text clipboard synchronization.
+- Native Windows and macOS clipboard access.
+- Ordinary keyboard shortcuts and application Copy/Paste menus.
+- Exact Unicode and multiline text preservation.
+- UTF-8 transport over authenticated SSH.
+- Password authentication and SSH host-key verification.
+- Clipboard metadata and native change-counter inspection.
+- Counter-aware conditional clipboard writes.
+- Automatic clipboard feedback-loop prevention.
+- Identical payload suppression.
+- Simultaneous-change detection and conflict preservation.
+- Startup baseline initialization without clipboard modification.
 - Clipboard payload validation.
-- 1 MiB clipboard size limit.
+- 1 MiB plain-text clipboard size limit.
+- Native macOS menu bar application.
+- Foreground Windows synchronization command.
 - No application-level clipboard history or content logging.
 
 ## Building
@@ -39,10 +49,38 @@ The current development endpoint is 127.0.0.1:2222.
 The SSH server host key must already be trusted in the
 Windows user's OpenSSH known_hosts file.
 
+Build and launch the macOS ReimsBridge application using
+the Xcode project located in `macos/ReimsBridge`.
+
+Ensure the native IPC service is listening before starting
+automatic synchronization on Windows.
+
+```powershell
+cargo run -- watch <username>
+```
+
+Once connected, ordinary Windows and macOS Copy/Paste
+operations automatically synchronize supported text.
+
+Press Ctrl+C in the Windows terminal to stop synchronization.
+
+Diagnostic and manual transfer commands:
+
 ```powershell
 cargo run -- ssh-test <username>
 cargo run -- clipboard-check
+cargo run -- clipboard-metadata
 cargo run -- clipboard-test
+cargo run -- mac-status <username>
+cargo run -- mac-send <username>
+cargo run -- mac-receive <username>
+cargo run -- mac-conditional-test <username>
+cargo run -- watch-test <username>
+```
+
+Legacy pbcopy/pbpaste development commands:
+
+```powershell
 cargo run -- send <username>
 cargo run -- receive <username>
 cargo run -- roundtrip-test <username>
@@ -54,24 +92,94 @@ in the application or configuration files.
 ## Testing
 
 ```powershell
+cargo fmt --check
 cargo test
-cargo clippy -- -D warnings
-cargo run -- roundtrip-test <username>
+cargo clippy --all-targets -- -D warnings
+cargo run -- clipboard-test
+cargo run -- mac-conditional-test <username>
+cargo run -- watch-test <username>
 ```
 
-The clipboard-test and roundtrip-test commands deliberately
-replace existing clipboard contents.
+The macOS application also provides a native clipboard
+self-test using a private pasteboard.
+
+The integration test commands deliberately replace existing
+clipboard contents. Stop automatic synchronization before
+running these tests.
+
+The automatic synchronization acceptance test covers:
+
+- Startup baseline preservation.
+- Bidirectional automatic synchronization.
+- Exact Unicode and formatting preservation.
+- Feedback-loop prevention.
+- Identical payload suppression.
+- Simultaneous-change detection.
+- Preservation of conflicting clipboard contents.
+- Automatic synchronization after conflicts.
+- Maximum-size 1 MiB transfers in both directions.
+- Recovery after maximum-size transfers.
+- Idle clipboard counter stability.
+
+### Initial performance baseline
+
+Development environment: AMD Ryzen 9 7900 Windows host
+and virtualized macOS guest with 12 virtual CPUs.
+
+| Measurement | Observed result |
+|---|---:|
+| Windows idle CPU, total host capacity | 0.011% |
+| Windows idle CPU, single-core equivalent | 0.255% |
+| Windows working set | 9.52 MiB |
+| Windows private memory | 1.96 MiB |
+| Windows threads | 3 |
+| macOS idle CPU, observed sample | 0.2% |
+| macOS reported memory | 27 MiB |
+| macOS threads | 5 |
+| Automatic 1 MiB Windows to macOS | 2.121 s |
+| Automatic 1 MiB macOS to Windows | 6.700 s |
+
+These are preliminary development measurements rather than
+formal benchmarks. Application-level resource measurements
+exclude SSH and netcat subprocess overhead.
 
 ## Security
 
 Clipboard contents are transferred as data through SSH.
 They are never interpolated into executable shell commands.
 
-Automatic synchronization is not currently implemented.
+Automatic synchronization uses native clipboard APIs on
+both operating systems and a private Unix-domain socket
+on macOS, accessed through authenticated SSH.
 
-The current macOS transport uses pbcopy and pbpaste.
-Reliable identification of sensitive clipboard formats
-requires further native clipboard integration.
+The local socket directory and socket use restricted
+filesystem permissions. Local IPC clients are checked
+against the application user's identity.
+
+Native clipboard change counters and conditional writes
+mitigate clipboard races and prevent synchronization loops.
+
+Simultaneous detected changes preserve both clipboards
+rather than arbitrarily selecting a winning copy.
+
+Conditional writes provide best-effort race protection,
+not atomic cross-platform compare-and-swap semantics.
+
+Uncertain writes are not automatically retried.
+
+Privacy markers are detected on a best-effort basis.
+Marked text is synchronized by default. Optional privacy
+marker enforcement is planned for a future release.
+
+Privacy markers themselves are not currently preserved
+during text transfers.
+
+The current foreground synchronization implementation
+stops on transport failures. Automatic reconnection and
+secure credential storage remain future milestones.
+
+Only validated plain text is currently synchronized.
+Rich text, images and file transfers remain future work.
 
 ## Production acceptance criteria
 
@@ -106,7 +214,8 @@ Production targets:
 - Secure credential storage after initial setup.
 - Optional automatic application startup.
 - User-controlled synchronization pause and resume.
-- Best-effort exclusion of sensitive clipboard contents.
+- Best-effort privacy marker detection.
+- Optional privacy marker enforcement, disabled by default.
 - No permanent clipboard content history.
 - No clipboard content logging or telemetry.
 - No additional network ports or external services.
@@ -132,7 +241,15 @@ transfers without unnecessary eager copying.
 - [x] M2.2C.1: Native macOS clipboard retrieval
 - [x] M2.2C.2: Native bidirectional clipboard transfers
 - [x] M2.2D: Maximum-size text transfer validation
-- [ ] M2.3: Automatic bidirectional text synchronization
+- [x] M2.3: Automatic bidirectional text synchronization
+- [x] M2.3A: Native clipboard metadata
+- [x] M2.3B: Synchronization decision engine
+- [x] M2.3C.1A: Counter-aware Windows clipboard writes
+- [x] M2.3C.1B: Counter-aware macOS clipboard writes
+- [x] M2.3C.2A: Conditional macOS IPC writes
+- [x] M2.3C.2B: Rust conditional IPC integration
+- [x] M2.3C.3: Foreground automatic synchronization
+- [x] M2.3D: Automatic synchronization acceptance
 - [ ] M3: Complete native macOS menu bar interface
 - [ ] M4: Native Windows system tray companion
 - [ ] M5: Reconnection and credential management
