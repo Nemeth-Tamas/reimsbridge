@@ -26,7 +26,9 @@ final class IPCConnection {
     private var sentBytes = 0
 
     private static let maxRequestBytes = 16
+    private static let readChunkBytes = 64 * 1024
     private static let writeChunkBytes = 64 * 1024
+    private static let maxReadsPerTick = 4
     private static let maxWritesPerTick = 4
 
     init(fd: Int32) {
@@ -71,9 +73,30 @@ final class IPCConnection {
     }
 
     private func receiveRequest() -> Progress {
+        for _ in 0..<Self.maxReadsPerTick {
+            let previousRequestBytes = request.count
+
+            switch receiveChunk() {
+            case .finished:
+                return .finished
+
+            case .failed:
+                return .failed
+
+            case .pending:
+                if request.count == previousRequestBytes {
+                    return .pending
+                }
+            }
+        }
+
+        return .pending
+    }
+
+    private func receiveChunk() -> Progress {
         var buffer = [UInt8](
             repeating: 0,
-            count: Self.maxRequestBytes
+            count: Self.readChunkBytes
         )
 
         let received = buffer.withUnsafeMutableBytes {
@@ -99,35 +122,148 @@ final class IPCConnection {
             return .failed
         }
 
+        let maxFrameBytes =
+            ClipboardService.maxClipboardBytes
+            + Self.maxRequestBytes
+            + 1
+
+        guard received <= maxFrameBytes - request.count else {
+            return finishRequest(
+                Data("ERR OVERSIZED\n".utf8)
+            )
+        }
+
         request.append(
             contentsOf: buffer.prefix(received)
         )
 
-        if request.count > Self.maxRequestBytes {
-            response = Data("ERR BAD_REQUEST\n".utf8)
-            return .finished
-        }
+        return parseRequest()
+    }
 
-        guard let newline = request.firstIndex(of: 10) else {
+    private func parseRequest() -> Progress {
+        guard let newline = request
+            .prefix(Self.maxRequestBytes)
+            .firstIndex(of: 10)
+        else {
+            if request.count >= Self.maxRequestBytes {
+                return finishRequest(
+                    Data("ERR BAD_REQUEST\n".utf8)
+                )
+            }
+
             return .pending
         }
 
-        guard newline == request.count - 1 else {
-            response = Data("ERR BAD_REQUEST\n".utf8)
-            return .finished
+        let header = String(
+            decoding: request[..<newline],
+            as: UTF8.self
+        )
+
+        let payloadStart = newline + 1
+
+        if header == "status" || header == "read" {
+            guard request.count == payloadStart else {
+                return finishRequest(
+                    Data("ERR BAD_REQUEST\n".utf8)
+                )
+            }
+
+            return finishRequest(
+                header == "status"
+                    ? statusResponse()
+                    : readResponse()
+            )
         }
 
-        if request == Data("status\n".utf8) {
-            response = statusResponse()
-        } else if request == Data("read\n".utf8) {
-            response = readResponse()
-        } else {
-            response = Data("ERR BAD_REQUEST\n".utf8)
+        guard header.hasPrefix("write ") else {
+            return finishRequest(
+                Data("ERR BAD_REQUEST\n".utf8)
+            )
         }
 
+        let sizeString = header.dropFirst(6)
+
+        guard !sizeString.isEmpty,
+              sizeString.utf8.allSatisfy({
+                  (48...57).contains($0)
+              }),
+              let payloadSize = Int(sizeString)
+        else {
+            return finishRequest(
+                Data("ERR BAD_REQUEST\n".utf8)
+            )
+        }
+
+        guard payloadSize > 0 else {
+            return finishRequest(
+                Data("ERR NO_TEXT\n".utf8)
+            )
+        }
+
+        guard payloadSize <= ClipboardService.maxClipboardBytes else {
+            return finishRequest(
+                Data("ERR OVERSIZED\n".utf8)
+            )
+        }
+
+        let payloadEnd = payloadStart + payloadSize
+        let expectedFrameBytes = payloadEnd + 1
+
+        if request.count < expectedFrameBytes {
+            return .pending
+        }
+
+        guard request.count == expectedFrameBytes,
+              request.last == 0
+        else {
+            return finishRequest(
+                Data("ERR BAD_REQUEST\n".utf8)
+            )
+        }
+
+        let payload = Data(
+            request[payloadStart..<payloadEnd]
+        )
+
+        return finishRequest(
+            writeResponse(payload)
+        )
+    }
+
+    private func finishRequest(
+        _ data: Data
+    ) -> Progress {
+        response = data
         request.removeAll()
 
         return .finished
+    }
+
+    private func writeResponse(
+        _ payload: Data
+    ) -> Data {
+        let text = String(
+            decoding: payload,
+            as: UTF8.self
+        )
+
+        guard text.utf8.elementsEqual(payload) else {
+            return Data("ERR INVALID_TEXT\n".utf8)
+        }
+
+        do {
+            try ClipboardService.writeText(text)
+
+            return Data("OK\n".utf8)
+        } catch ClipboardError.noText {
+            return Data("ERR NO_TEXT\n".utf8)
+        } catch ClipboardError.oversized {
+            return Data("ERR OVERSIZED\n".utf8)
+        } catch ClipboardError.embeddedNul {
+            return Data("ERR INVALID_TEXT\n".utf8)
+        } catch {
+            return Data("ERR WRITE_FAILED\n".utf8)
+        }
     }
 
     private func statusResponse() -> Data {
