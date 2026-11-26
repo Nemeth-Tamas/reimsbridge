@@ -111,10 +111,10 @@ pub fn inspect_payload(source: &str, destination: Option<&str>) -> PayloadDecisi
         return PayloadDecision::Invalid;
     }
 
-    if let Some(destination) = destination {
-        if source.as_bytes() == destination.as_bytes() {
-            return PayloadDecision::Identical;
-        }
+    if let Some(destination) = destination
+        && source.as_bytes() == destination.as_bytes()
+    {
+        return PayloadDecision::Identical;
     }
 
     PayloadDecision::Write
