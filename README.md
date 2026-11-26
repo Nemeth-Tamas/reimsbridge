@@ -73,14 +73,72 @@ The current macOS transport uses pbcopy and pbpaste.
 Reliable identification of sensitive clipboard formats
 requires further native clipboard integration.
 
+## Production acceptance criteria
+
+ReimsBridge aims to provide transparent, native clipboard
+integration between Windows and macOS.
+
+After initial setup, users must be able to copy and paste
+between operating systems using their ordinary keyboard
+shortcuts and application menus.
+
+No additional transfer buttons, special keyboard shortcuts
+or manual confirmation should be required during normal
+clipboard synchronization.
+
+Production targets:
+
+- Automatic bidirectional plain-text synchronization.
+- Exact Unicode and multiline text preservation.
+- Compatible rich-text and HTML clipboard formats.
+- Native image and screenshot synchronization.
+- Image transparency preservation where supported.
+- Bidirectional file transfers of at least 1 GiB per file.
+- Multiple-file and recursive directory transfers.
+- Bounded-memory streaming for large payloads.
+- Native Explorer and Finder copy/paste integration.
+- Transfer progress and cancellation for large files.
+- File integrity verification and safe temporary staging.
+- Automatic clipboard feedback-loop prevention.
+- Unchanged-content suppression.
+- Deterministic simultaneous-change handling.
+- Automatic recovery following VM or SSH disconnection.
+- Secure credential storage after initial setup.
+- Optional automatic application startup.
+- User-controlled synchronization pause and resume.
+- Best-effort exclusion of sensitive clipboard contents.
+- No permanent clipboard content history.
+- No clipboard content logging or telemetry.
+- No additional network ports or external services.
+
+Large file transfers must not require loading the entire
+file into memory.
+
+Native delayed rendering and file-promise mechanisms
+should be investigated to support transparent file
+transfers without unnecessary eager copying.
+
 ## Roadmap
 
 - [x] M0: SSH clipboard proof of concept
 - [x] M1.1: Native Rust SSH transport
 - [x] M1.2: Native Windows clipboard access
 - [x] M1.3: Manual bidirectional synchronization
-- [ ] M1.4: Transfer validation and hardening
-- [ ] M2: Automatic bidirectional synchronization
-- [ ] M3: Native SwiftUI macOS menu bar application
+- [x] M1.4: Transfer validation and hardening
+- [x] M2.0: Native SwiftUI macOS application
+- [x] M2.1: Native macOS clipboard service
+- [x] M2.2A: Private Unix-domain socket IPC
+- [x] M2.2B: Rust IPC integration
+- [x] M2.2C.1: Native macOS clipboard retrieval
+- [x] M2.2C.2: Native bidirectional clipboard transfers
+- [x] M2.2D: Maximum-size text transfer validation
+- [ ] M2.3: Automatic bidirectional text synchronization
+- [ ] M3: Complete native macOS menu bar interface
 - [ ] M4: Native Windows system tray companion
-- [ ] M5: Reconnection, security and packaging
+- [ ] M5: Reconnection and credential management
+- [ ] M6: Multi-format clipboard protocol
+- [ ] M7: Native image and rich-text synchronization
+- [ ] M8: Streaming file transfer protocol
+- [ ] M9: Transparent Explorer and Finder integration
+- [ ] M10: Performance, security and reliability hardening
+- [ ] M11: Production packaging and release
