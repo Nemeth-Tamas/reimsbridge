@@ -102,6 +102,7 @@ fn print_help() {
     println!("  reimsbridge-windows clipboard-test");
     println!("  reimsbridge-windows ssh-test <username>");
     println!("  reimsbridge-windows mac-status <username>");
+    println!("  reimsbridge-windows mac-receive <username>");
     println!("  reimsbridge-windows send <username>");
     println!("  reimsbridge-windows receive <username>");
     println!("  reimsbridge-windows roundtrip-test <username>");
@@ -109,7 +110,7 @@ fn print_help() {
 
 fn run() -> Result<(), Box<dyn Error>> {
     println!("ReimsBridge v{}", env!("CARGO_PKG_VERSION"));
-    println!("M2.2B - Native macOS IPC integration");
+    println!("M2.2C.1 - Native macOS clipboard retrieval");
     println!();
 
     let mut args = env::args().skip(1);
@@ -126,7 +127,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         "clipboard-check" => return clipboard::check(),
         "clipboard-test" => return clipboard::self_test(),
-        "ssh-test" | "send" | "receive" | "roundtrip-test" | "mac-status" => {}
+        "ssh-test" | "send" | "receive" | "roundtrip-test" | "mac-status" | "mac-receive" => {}
         _ => {
             print_help();
             return Err("Unknown command".into());
@@ -144,6 +145,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     match command.as_str() {
         "ssh-test" => transport_test(&session)?,
         "mac-status" => mac_ipc::check(&session)?,
+        "mac-receive" => mac_ipc::receive(&session)?,
         "send" => sync::send(&session)?,
         "receive" => sync::receive(&session)?,
         "roundtrip-test" => sync::roundtrip_test(&session)?,
