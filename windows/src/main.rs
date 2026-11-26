@@ -1,3 +1,5 @@
+mod clipboard;
+
 use ssh2::{CheckResult, KnownHostFileKind, Session};
 use std::env;
 use std::error::Error;
@@ -72,13 +74,21 @@ fn connect(username: &str) -> Result<Session, Box<dyn Error>> {
 
 fn run() -> Result<(), Box<dyn Error>> {
     println!("ReimsBridge v{}", env!("CARGO_PKG_VERSION"));
-    println!("M1.1 - SSH transport verification");
+    println!("M1.2 - Native clipboard verification");
     println!();
 
-    let username = env::args()
-        .nth(1)
-        .ok_or("Usage: reimsbridge-windows <username>")?;
+    let argument = env::args().nth(1).ok_or(
+        "Usage: reimsbridge-windows \
+             <username|clipboard-check|clipboard-test>",
+    )?;
 
+    match argument.as_str() {
+        "clipboard-check" => return clipboard::check(),
+        "clipboard-test" => return clipboard::self_test(),
+        _ => {}
+    }
+
+    let username = argument;
     let session = connect(&username)?;
 
     let mut channel = session.channel_session()?;
