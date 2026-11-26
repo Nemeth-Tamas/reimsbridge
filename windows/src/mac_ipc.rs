@@ -189,7 +189,7 @@ mod tests {
     use super::*;
 
     const VALID_RESPONSE: &[u8] = br#"{
-        "protocol": 1,
+        "protocol": 2,
         "status": "ok",
         "changeCount": 14,
         "hasPlainText": true,
@@ -232,14 +232,16 @@ mod tests {
     #[test]
     fn remote_error_rejected() {
         let response = br#"{
-            "protocol": 1,
+            "protocol": 2,
             "status": "error",
             "changeCount": 14,
             "hasPlainText": true,
             "isExcluded": false
         }"#;
 
-        assert!(parse_status(response).is_err());
+        let error = parse_status(response).unwrap_err();
+
+        assert_eq!(error.to_string(), "macOS IPC returned an error");
     }
 
     #[test]
