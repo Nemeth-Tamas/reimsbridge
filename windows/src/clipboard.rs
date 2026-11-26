@@ -1,3 +1,4 @@
+use crate::sync_read::ReadOutcome;
 use crate::validation::validate_text;
 use clipboard_win::{
     Clipboard, Getter, Setter, formats, get_clipboard, is_format_avail, register_format, seq_num,
@@ -35,7 +36,7 @@ fn has_excluded_format() -> Result<bool, Box<dyn Error>> {
     Ok(false)
 }
 
-pub fn metadata() -> Result<WindowsClipboardMetadata, Box<dyn Error>> {
+pub fn metadata_checked() -> Result<Option<WindowsClipboardMetadata>, Box<dyn Error>> {
     let before = sequence_number()?;
 
     let has_plain_text = is_format_avail(formats::CF_UNICODETEXT);
@@ -44,14 +45,18 @@ pub fn metadata() -> Result<WindowsClipboardMetadata, Box<dyn Error>> {
     let after = sequence_number()?;
 
     if before != after {
-        return Err("Clipboard changed during metadata inspection".into());
+        return Ok(None);
     }
 
-    Ok(WindowsClipboardMetadata {
+    Ok(Some(WindowsClipboardMetadata {
         sequence_number: after,
         has_plain_text,
         is_excluded,
-    })
+    }))
+}
+
+pub fn metadata() -> Result<WindowsClipboardMetadata, Box<dyn Error>> {
+    metadata_checked()?.ok_or_else(|| "Clipboard changed during metadata inspection".into())
 }
 
 pub fn check_metadata() -> Result<(), Box<dyn Error>> {
@@ -83,6 +88,34 @@ pub fn read_text() -> Result<String, Box<dyn Error>> {
     validate_text(&text)?;
 
     Ok(text)
+}
+
+pub fn read_for_sync() -> Result<ReadOutcome, Box<dyn Error>> {
+    let Some(before) = metadata_checked()? else {
+        return Ok(ReadOutcome::Changed);
+    };
+
+    if !before.has_plain_text {
+        return Ok(ReadOutcome::Unavailable);
+    }
+
+    let result = get_clipboard(formats::Unicode);
+
+    let Some(after) = metadata_checked()? else {
+        return Ok(ReadOutcome::Changed);
+    };
+
+    if before.sequence_number != after.sequence_number {
+        return Ok(ReadOutcome::Changed);
+    }
+
+    let text: String = result?;
+
+    if validate_text(&text).is_err() {
+        return Ok(ReadOutcome::Unavailable);
+    }
+
+    Ok(ReadOutcome::Text(text))
 }
 
 fn verify_written_text(expected: &str) -> Result<u32, Box<dyn Error>> {

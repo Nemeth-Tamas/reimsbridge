@@ -3,6 +3,7 @@ use ssh2::{ExtendedData, Session};
 use std::error::Error;
 use std::io::{Read, Write};
 
+use crate::sync_read::ReadOutcome;
 use crate::{clipboard, validation};
 
 const PROTOCOL_VERSION: u32 = 2;
@@ -149,6 +150,28 @@ pub fn read_text(session: &Session) -> Result<String, Box<dyn Error>> {
     )?;
 
     parse_read(response)
+}
+
+fn parse_sync_read(response: Vec<u8>) -> Result<ReadOutcome, Box<dyn Error>> {
+    match response.as_slice() {
+        b"ERR NO_TEXT\n" | b"ERR OVERSIZED\n" | b"ERR INVALID_TEXT\n" => {
+            Ok(ReadOutcome::Unavailable)
+        }
+
+        b"ERR CLIPBOARD_CHANGED\n" => Ok(ReadOutcome::Changed),
+
+        _ => parse_read(response).map(ReadOutcome::Text),
+    }
+}
+
+pub fn read_for_sync(session: &Session) -> Result<ReadOutcome, Box<dyn Error>> {
+    let response = query(
+        session,
+        b"read\n",
+        validation::MAX_CLIPBOARD_BYTES + MAX_HEADER_BYTES,
+    )?;
+
+    parse_sync_read(response)
 }
 
 pub fn receive(session: &Session) -> Result<(), Box<dyn Error>> {
@@ -515,6 +538,54 @@ mod tests {
         let response = vec![b'x'; MAX_RESPONSE_BYTES + 1];
 
         assert!(parse_status(&response).is_err());
+    }
+
+    #[test]
+    fn sync_read_valid_text() {
+        let response = b"OK 5\nHello".to_vec();
+
+        let result = parse_sync_read(response).unwrap();
+
+        assert!(matches!(
+            result,
+            ReadOutcome::Text(text) if text == "Hello"
+        ));
+    }
+
+    #[test]
+    fn sync_read_unavailable() {
+        for response in [
+            b"ERR NO_TEXT\n".as_slice(),
+            b"ERR OVERSIZED\n",
+            b"ERR INVALID_TEXT\n",
+        ] {
+            assert!(matches!(
+                parse_sync_read(response.to_vec()).unwrap(),
+                ReadOutcome::Unavailable
+            ));
+        }
+    }
+
+    #[test]
+    fn sync_read_changed() {
+        assert!(matches!(
+            parse_sync_read(b"ERR CLIPBOARD_CHANGED\n".to_vec()).unwrap(),
+            ReadOutcome::Changed
+        ));
+    }
+
+    #[test]
+    fn sync_read_unexpected_failures() {
+        for response in [
+            b"ERR READ_FAILED\n".as_slice(),
+            b"ERR EXCLUDED\n",
+            b"ERR UNKNOWN\n",
+            b"ERR NO_TEXT\nextra",
+            b"OK 10\nHello",
+            b"",
+        ] {
+            assert!(parse_sync_read(response.to_vec()).is_err());
+        }
     }
 
     #[test]

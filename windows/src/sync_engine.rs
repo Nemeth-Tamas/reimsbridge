@@ -45,6 +45,7 @@ impl SyncEngine {
         Self::default()
     }
 
+    #[cfg(test)]
     pub fn reset(&mut self) {
         self.baseline = None;
     }

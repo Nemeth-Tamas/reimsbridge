@@ -2,9 +2,10 @@ mod clipboard;
 mod mac_ipc;
 mod remote_clipboard;
 mod sync;
-#[cfg(test)]
 mod sync_engine;
+mod sync_read;
 mod validation;
+mod watch;
 
 use ssh2::{CheckResult, KnownHostFileKind, Session};
 use std::env;
@@ -108,6 +109,7 @@ fn print_help() {
     println!("  reimsbridge-windows mac-receive <username>");
     println!("  reimsbridge-windows mac-send <username>");
     println!("  reimsbridge-windows mac-conditional-test <username>");
+    println!("  reimsbridge-windows watch <username>");
     println!("  reimsbridge-windows send <username>");
     println!("  reimsbridge-windows receive <username>");
     println!("  reimsbridge-windows roundtrip-test <username>");
@@ -115,7 +117,7 @@ fn print_help() {
 
 fn run() -> Result<(), Box<dyn Error>> {
     println!("ReimsBridge v{}", env!("CARGO_PKG_VERSION"));
-    println!("M2.3C.2B - Conditional native clipboard IPC");
+    println!("M2.3C.3 - Automatic bidirectional clipboard synchronization");
     println!();
 
     let mut args = env::args().skip(1);
@@ -140,7 +142,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         | "mac-status"
         | "mac-receive"
         | "mac-send"
-        | "mac-conditional-test" => {}
+        | "mac-conditional-test"
+        | "watch" => {}
         _ => {
             print_help();
             return Err("Unknown command".into());
@@ -161,6 +164,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         "mac-receive" => mac_ipc::receive(&session)?,
         "mac-send" => mac_ipc::send(&session)?,
         "mac-conditional-test" => mac_ipc::test_checked_write(&session)?,
+        "watch" => watch::run(&session)?,
         "send" => sync::send(&session)?,
         "receive" => sync::receive(&session)?,
         "roundtrip-test" => sync::roundtrip_test(&session)?,
