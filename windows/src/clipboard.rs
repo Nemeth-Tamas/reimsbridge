@@ -1,6 +1,6 @@
 use crate::validation::validate_text;
 use clipboard_win::{
-    Clipboard, Setter, formats, get_clipboard, is_format_avail, register_format, seq_num,
+    Clipboard, Getter, Setter, formats, get_clipboard, is_format_avail, register_format, seq_num,
 };
 use std::error::Error;
 
@@ -85,6 +85,28 @@ pub fn read_text() -> Result<String, Box<dyn Error>> {
     Ok(text)
 }
 
+fn verify_written_text(expected: &str) -> Result<u32, Box<dyn Error>> {
+    let _guard = Clipboard::new_attempts(10)?;
+
+    let before = sequence_number()?;
+
+    let mut received = String::new();
+
+    formats::Unicode.read_clipboard(&mut received)?;
+
+    let after = sequence_number()?;
+
+    if before != after {
+        return Err("Clipboard changed during post-write verification".into());
+    }
+
+    if received.as_bytes() != expected.as_bytes() {
+        return Err("Clipboard replaced before write verification".into());
+    }
+
+    Ok(after)
+}
+
 pub fn write_text_checked(
     text: &str,
     expected_sequence: Option<u32>,
@@ -101,9 +123,9 @@ pub fn write_text_checked(
 
     formats::Unicode.write_clipboard(&text)?;
 
-    let written_sequence = sequence_number()?;
-
     drop(guard);
+
+    let written_sequence = verify_written_text(text)?;
 
     Ok(Some(written_sequence))
 }
@@ -218,6 +240,30 @@ pub fn self_test() -> Result<(), Box<dyn Error>> {
     }
 
     println!("[CLIPBOARD] Invalid write preservation: PASS");
+
+    const REPLACEMENT_FIXTURE: &str = "Simulated external clipboard replacement";
+
+    write_text(REPLACEMENT_FIXTURE)?;
+
+    let replacement_sequence = sequence_number()?;
+
+    if verify_written_text(SECOND_FIXTURE).is_ok() {
+        return Err("Replaced clipboard incorrectly attributed to previous write".into());
+    }
+
+    println!("[CLIPBOARD] External replacement detected: PASS");
+
+    if sequence_number()? != replacement_sequence {
+        return Err("Post-write verification modified clipboard sequence".into());
+    }
+
+    let received = read_text()?;
+
+    if received.as_bytes() != REPLACEMENT_FIXTURE.as_bytes() {
+        return Err("Post-write verification modified external content".into());
+    }
+
+    println!("[CLIPBOARD] External replacement preserved: PASS");
     println!("[CLIPBOARD] All counter-aware write tests: PASS");
 
     Ok(())
