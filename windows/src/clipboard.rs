@@ -68,10 +68,6 @@ pub fn check_metadata() -> Result<(), Box<dyn Error>> {
 pub fn read_text() -> Result<String, Box<dyn Error>> {
     let before = metadata()?;
 
-    if before.is_excluded {
-        return Err("Clipboard content is excluded".into());
-    }
-
     if !before.has_plain_text {
         return Err("Clipboard does not contain plain text".into());
     }
@@ -82,10 +78,6 @@ pub fn read_text() -> Result<String, Box<dyn Error>> {
 
     if before.sequence_number != after.sequence_number {
         return Err("Clipboard changed during text retrieval".into());
-    }
-
-    if after.is_excluded {
-        return Err("Clipboard content is excluded".into());
     }
 
     validate_text(&text)?;
