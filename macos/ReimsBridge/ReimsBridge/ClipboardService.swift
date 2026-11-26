@@ -79,12 +79,13 @@ enum ClipboardService {
     }
     
     static func readText(
-        _ pasteboard: NSPasteboard = .general
+        _ pasteboard: NSPasteboard = .general,
+        respectPrivacyMarkers: Bool = false
     ) throws -> String {
         let initialCount = pasteboard.changeCount
         let metadata = inspect(pasteboard)
         
-        guard !metadata.isExcluded else {
+        guard !respectPrivacyMarkers || !metadata.isExcluded else {
             throw ClipboardError.excluded
         }
         
@@ -200,8 +201,17 @@ enum ClipboardService {
                 throw ClipboardError.testFailed
             }
             
+            let markedText = try readText(pasteboard)
+
+            guard markedText.utf8.elementsEqual("Synthetic test".utf8) else {
+                throw ClipboardError.testFailed
+            }
+
             do {
-                _ = try readText(pasteboard)
+                _ = try readText(
+                    pasteboard,
+                    respectPrivacyMarkers: true
+                )
                 throw ClipboardError.testFailed
             } catch ClipboardError.excluded {
                 continue
