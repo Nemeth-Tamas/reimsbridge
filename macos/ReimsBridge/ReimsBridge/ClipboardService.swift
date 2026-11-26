@@ -113,10 +113,11 @@ enum ClipboardService {
         return text
     }
     
-    static func writeText(
+    static func writeTextChecked(
         _ text: String,
-        to pasteboard: NSPasteboard = .general
-    ) throws {
+        to pasteboard: NSPasteboard = .general,
+        expectedChangeCount: Int? = nil
+    ) throws -> Int? {
         try validate(text)
 
         let item = NSPasteboardItem()
@@ -125,11 +126,42 @@ enum ClipboardService {
             throw ClipboardError.writeFailed
         }
 
-        pasteboard.clearContents()
+        if let expectedChangeCount,
+           pasteboard.changeCount != expectedChangeCount {
+            return nil
+        }
+
+        let ownedCount = pasteboard.clearContents()
+
+        guard pasteboard.changeCount == ownedCount else {
+            throw ClipboardError.changedDuringWrite
+        }
 
         guard pasteboard.writeObjects([item]) else {
             throw ClipboardError.writeFailed
         }
+
+        guard pasteboard.changeCount == ownedCount else {
+            throw ClipboardError.changedDuringWrite
+        }
+
+        guard let received = pasteboard.string(forType: .string),
+              received.utf8.elementsEqual(text.utf8) else {
+            throw ClipboardError.changedDuringWrite
+        }
+
+        guard pasteboard.changeCount == ownedCount else {
+            throw ClipboardError.changedDuringWrite
+        }
+
+        return ownedCount
+    }
+
+    static func writeText(
+        _ text: String,
+        to pasteboard: NSPasteboard = .general
+    ) throws {
+        _ = try writeTextChecked(text, to: pasteboard)
     }
     
     static func selfTest() throws -> Int {
