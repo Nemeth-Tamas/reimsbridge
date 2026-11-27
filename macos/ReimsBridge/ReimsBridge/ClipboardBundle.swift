@@ -107,7 +107,7 @@ struct ClipboardBundle {
             (.rtf, rtf), (.html, html), (.png, png)
         ]
         if !png.isEmpty {
-            guard let image = bitmapImage(from: png),
+            guard let image = Self.bitmapImage(from: png),
                   let tiff = NSBitmapImageRep(cgImage: image).tiffRepresentation
             else { throw ClipboardError.invalidBundle }
             formats.append((.tiff, tiff))
