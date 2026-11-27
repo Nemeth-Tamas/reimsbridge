@@ -445,4 +445,4 @@ transfers without unnecessary eager copying.
 - [x] M8: Streaming file transfer protocol (1 GiB SHA-256 verified in both directions)
 - [ ] M9: Transparent Explorer and Finder integration (native file lists passed, desktop paste check pending)
 - [ ] M10: Performance, security and reliability hardening (large-file acceptance passed, interruption test pending)
-- [ ] M11: Production packaging and release (unsigned build and desktop acceptance pending)
+- [ ] M11: Production packaging and release (unsigned packages built, desktop acceptance pending)
