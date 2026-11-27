@@ -97,9 +97,6 @@ your macOS SSH account. Each app offers a login startup option.
 
 ### Other builds
 
-GitHub Actions also builds both packages in
-[Build unsigned packages](https://github.com/Nemeth-Tamas/reimsbridge/actions/workflows/packages.yml).
-
 For Windows development builds without an installer:
 
 ```powershell
