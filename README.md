@@ -38,7 +38,7 @@ host and a macOS guest running under Reims vGPU/QEMU.
 - Automatic tray reconnection after temporary SSH and macOS IPC failures.
 - Optional SSH credential storage in Windows Credential Manager.
 - macOS menu bar icon for IPC state and recent watcher activity.
-- Live macOS clipboard metadata and per-session IPC transfer statistics.
+- macOS clipboard metadata and per-session IPC transfer statistics.
 - Persistent macOS preferences for IPC startup and statistics visibility.
 - No application-level clipboard history or content logging.
 
@@ -256,9 +256,10 @@ both directions when both ends support bundles.
 ### macOS menu bar
 
 The macOS menu shows the current IPC state and recent Windows watcher
-activity. Clipboard metadata updates automatically, including while IPC is
-stopped. Clipboard validation and the private-pasteboard self-test are
-available under **Diagnostics**.
+activity. Clipboard metadata refreshes each time the menu opens, including
+while IPC is stopped. Transfer statistics also refresh on open. Clipboard
+validation and the private-pasteboard self-test are available under
+**Diagnostics**.
 
 Under **Preferences**, enable **Start IPC on Launch** to start the
 listener whenever ReimsBridge opens. Manual startup is the default.

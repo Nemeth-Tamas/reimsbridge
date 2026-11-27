@@ -5,7 +5,6 @@
 //  Created by Tamas Nemeth on 2026. 11. 26..
 //
 
-import SwiftUI
 import AppKit
 import Foundation
 
@@ -16,8 +15,11 @@ enum ReimsBridgePreferences {
 
 @MainActor
 final class ReimsBridgeAppDelegate: NSObject, NSApplicationDelegate {
+    private var statusMenu: ReimsBridgeStatusMenu?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         ClipboardMonitor.shared.start()
+        statusMenu = ReimsBridgeStatusMenu()
 
         if UserDefaults.standard.bool(forKey: ReimsBridgePreferences.startIPCOnLaunch) {
             LocalIPC.shared.start()
@@ -31,28 +33,15 @@ final class ReimsBridgeAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-struct ReimsBridgeApp: App {
-    @NSApplicationDelegateAdaptor(ReimsBridgeAppDelegate.self) private var appDelegate
-    @StateObject private var ipc = LocalIPC.shared
-
-    var body: some Scene {
-        let label = menuBarLabel
-        MenuBarExtra(label.title, systemImage: label.symbol) {
-            ContentView()
-        }
-        .menuBarExtraStyle(.menu)
-    }
-
-    private var menuBarLabel: (title: LocalizedStringKey, symbol: String) {
-        switch ipc.state {
-        case .stopped(cleanupError: nil):
-            return ("ReimsBridge: IPC stopped", "pause.circle")
-        case .stopped, .failed:
-            return ("ReimsBridge: IPC error", "exclamationmark.triangle")
-        case .listening(watcherRecentlySeen: false):
-            return ("ReimsBridge: IPC listening", "arrow.left.arrow.right")
-        case .listening(watcherRecentlySeen: true):
-            return ("ReimsBridge: Windows watcher recently active", "checkmark.circle.fill")
+@MainActor
+enum ReimsBridgeApp {
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = ReimsBridgeAppDelegate()
+        application.delegate = delegate
+        application.setActivationPolicy(.accessory)
+        withExtendedLifetime(delegate) {
+            application.run()
         }
     }
 }
