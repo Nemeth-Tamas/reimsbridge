@@ -27,6 +27,8 @@ final class LocalIPC: ObservableObject {
     @Published private(set) var watcherRecentlySeen = false
     
     private var listener: Int32 = -1
+    private var listenerLock: Int32 = -1
+    private var boundSocketInfo: stat?
     private var timer: Timer?
     private var activity: (any NSObjectProtocol)?
 
@@ -44,6 +46,10 @@ final class LocalIPC: ObservableObject {
         directory + "/status.sock"
     }
     
+    private var lockPath: String {
+        directory + "/listener.lock"
+    }
+
     private init() {}
     
     func start() {
@@ -100,17 +106,33 @@ final class LocalIPC: ObservableObject {
 
         clients.removeAll()
         
+        var cleanupError: String?
+
         if listener >= 0 {
+            // Remove only the socket this listener actually bound.
+            // Keep the listener lock held through all cleanup.
+            if let boundSocketInfo {
+                do {
+                    try unlinkSocket(matching: boundSocketInfo)
+                } catch {
+                    cleanupError = error.localizedDescription
+                }
+            }
+
             Darwin.close(listener)
             listener = -1
-            
-            _ = Darwin.unlink(socketPath)
+            boundSocketInfo = nil
         }
-        
+
+        if listenerLock >= 0 {
+            Darwin.close(listenerLock)
+            listenerLock = -1
+        }
+
         lastWatcherActivity = nil
         watcherRecentlySeen = false
         isRunning = false
-        status = "Stopped"
+        status = cleanupError.map { "Stopped: \($0)" } ?? "Stopped"
     }
     
     private func systemError(
@@ -148,8 +170,139 @@ final class LocalIPC: ObservableObject {
         }
     }
     
+    private func acquireListenerLock() throws -> Int32 {
+        // Never unlink the lock file: all instances must lock the same inode.
+        let fd = Darwin.open(
+            lockPath,
+            O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC,
+            mode_t(0o600)
+        )
+
+        guard fd >= 0 else {
+            throw systemError("open listener lock")
+        }
+
+        var success = false
+        defer {
+            if !success {
+                Darwin.close(fd)
+            }
+        }
+
+        var info = stat()
+        guard Darwin.fstat(fd, &info) == 0 else {
+            throw systemError("fstat listener lock")
+        }
+
+        guard (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+              info.st_uid == getuid(),
+              (info.st_mode & 0o7777) == 0o600,
+              info.st_nlink == 1
+        else {
+            throw IPCError(message: "IPC listener lock is not private")
+        }
+
+        guard Darwin.flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            if errno == EWOULDBLOCK || errno == EAGAIN {
+                throw IPCError(message: "Another ReimsBridge IPC listener is running")
+            }
+
+            throw systemError("flock listener lock")
+        }
+
+        success = true
+        return fd
+    }
+
+    private func socketInfo() throws -> stat? {
+        var info = stat()
+
+        if Darwin.lstat(socketPath, &info) != 0 {
+            if errno == ENOENT {
+                return nil
+            }
+
+            throw systemError("lstat socket")
+        }
+
+        guard (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFSOCK),
+              info.st_uid == getuid()
+        else {
+            throw IPCError(message: "IPC socket path is not an owned socket")
+        }
+
+        return info
+    }
+
+    private func unlinkSocket(matching expected: stat) throws {
+        guard let current = try socketInfo() else {
+            return
+        }
+
+        guard current.st_dev == expected.st_dev,
+              current.st_ino == expected.st_ino
+        else {
+            throw IPCError(message: "IPC socket changed during cleanup")
+        }
+
+        guard Darwin.unlink(socketPath) == 0 else {
+            throw systemError("unlink socket")
+        }
+    }
+
+    private func recoverStaleSocket(address: inout sockaddr_un) throws {
+        guard let existing = try socketInfo() else {
+            return
+        }
+
+        // Older versions do not take the listener lock. Probe their socket
+        // before removing anything, and treat ambiguous results as live.
+        let probe = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard probe >= 0 else {
+            throw systemError("socket probe")
+        }
+
+        defer {
+            Darwin.close(probe)
+        }
+
+        guard Darwin.fcntl(probe, F_SETFL, O_NONBLOCK) >= 0 else {
+            throw systemError("fcntl socket probe")
+        }
+
+        let result = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                Darwin.connect(
+                    probe,
+                    socketAddress,
+                    socklen_t(MemoryLayout<sockaddr_un>.size)
+                )
+            }
+        }
+
+        if result == 0 {
+            throw IPCError(message: "Another IPC listener is already accepting connections")
+        }
+
+        let connectError = errno
+
+        guard connectError == ECONNREFUSED else {
+            throw IPCError(message: "Existing IPC socket could not be safely recovered (errno \(connectError))")
+        }
+
+        try unlinkSocket(matching: existing)
+    }
+
     private func startListener() throws {
         try prepareDirectory()
+
+        let lock = try acquireListenerLock()
+        var retainLock = false
+        defer {
+            if !retainLock {
+                Darwin.close(lock)
+            }
+        }
         
         var address = sockaddr_un()
         let pathBytes = Array(socketPath.utf8) + [0]
@@ -176,16 +329,16 @@ final class LocalIPC: ObservableObject {
             throw systemError("socket")
         }
         
-        var bound = false
+        var ownedSocket: stat?
         var success = false
-        
+
         defer {
             if !success {
-                Darwin.close(fd)
-                
-                if bound {
-                    _ = Darwin.unlink(socketPath)
+                if let ownedSocket {
+                    try? unlinkSocket(matching: ownedSocket)
                 }
+
+                Darwin.close(fd)
             }
         }
         
@@ -193,19 +346,33 @@ final class LocalIPC: ObservableObject {
             throw systemError("fcntl")
         }
         
-        let result = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
-                Darwin.bind(fd, socketAddress, socklen_t(
-                    MemoryLayout<sockaddr_un>.size
-                ))
+        func bindSocket() -> Int32 {
+            withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                    Darwin.bind(fd, socketAddress, socklen_t(
+                        MemoryLayout<sockaddr_un>.size
+                    ))
+                }
             }
         }
-        
-        guard result == 0 else {
-            throw systemError("bind")
+
+        if bindSocket() != 0 {
+            guard errno == EADDRINUSE else {
+                throw systemError("bind")
+            }
+
+            try recoverStaleSocket(address: &address)
+
+            guard bindSocket() == 0 else {
+                throw systemError("bind after stale socket recovery")
+            }
         }
-        
-        bound = true
+
+        guard let identity = try socketInfo() else {
+            throw IPCError(message: "Bound IPC socket disappeared")
+        }
+
+        ownedSocket = identity
         
         guard Darwin.chmod(socketPath, 0o600) == 0 else {
             throw systemError("chmod")
@@ -216,6 +383,9 @@ final class LocalIPC: ObservableObject {
         }
         
         listener = fd
+        boundSocketInfo = ownedSocket
+        listenerLock = lock
+        retainLock = true
         success = true
     }
     
