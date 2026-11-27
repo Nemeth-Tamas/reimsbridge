@@ -15,7 +15,7 @@ final class ReimsBridgeStatusMenu: NSObject, NSMenuDelegate {
 
     private var validation: (changeCount: Int, message: String)?
     private var selfTestStatus = "Not tested"
-    private var loginStartupError: String?
+    private var loginStartupHint: String?
 
     override init() {
         super.init()
@@ -97,11 +97,9 @@ final class ReimsBridgeStatusMenu: NSObject, NSMenuDelegate {
             loginEnabled ? "Disable Start at Login" : "Enable Start at Login",
             #selector(toggleLoginStartup(_:))
         ))
-        if loginStatus == .requiresApproval {
-            preferences.addItem(action("Open Login Item Settings", #selector(openLoginSettings(_:))))
-        }
-        if let loginStartupError {
-            preferences.addItem(label(loginStartupError))
+        preferences.addItem(action("Open Login Item Settings…", #selector(openLoginSettings(_:))))
+        if let loginStartupHint {
+            preferences.addItem(label(loginStartupHint))
         }
 
         let start = action("Start IPC on Launch", #selector(toggleIPCOnLaunch(_:)))
@@ -196,20 +194,25 @@ final class ReimsBridgeStatusMenu: NSObject, NSMenuDelegate {
 
     @objc private func toggleLoginStartup(_ sender: NSMenuItem) {
         let status = SMAppService.mainApp.status
+        let loginEnabled = status == .enabled || status == .requiresApproval
         do {
-            if status == .enabled || status == .requiresApproval {
+            if loginEnabled {
                 try SMAppService.mainApp.unregister()
             } else {
                 try SMAppService.mainApp.register()
                 defaults.set(true, forKey: ReimsBridgePreferences.startIPCOnLaunch)
             }
-            loginStartupError = nil
+            loginStartupHint = nil
         } catch {
-            loginStartupError = error.localizedDescription
+            loginStartupHint = loginEnabled
+                ? "Remove ReimsBridge from Open at Login"
+                : "Add ReimsBridge under Open at Login"
+            SMAppService.openSystemSettingsLoginItems()
         }
     }
 
     @objc private func openLoginSettings(_ sender: NSMenuItem) {
+        loginStartupHint = nil
         SMAppService.openSystemSettingsLoginItems()
     }
 

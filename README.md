@@ -262,10 +262,16 @@ Under **Preferences**, enable **Start IPC on Launch** to start the
 listener whenever ReimsBridge opens. Manual startup is the default.
 **Show Transfer Statistics** controls whether the menu displays session
 counters and is on by default. Both preferences persist across launches.
-Quitting the app stops the listener. Use **Preferences → Enable Start
-at Login** to register the macOS app as a login item. Enabling it also
-turns on **Start IPC on Launch**. If macOS requests approval, use
-**Open Login Item Settings** from the same menu.
+Quitting the app stops the listener.
+
+To launch the unsigned app at login, open **Preferences → Open Login
+Item Settings**. Under **Open at Login**, click **+** and add the
+installed `ReimsBridge.app` from Applications. Keep **Start IPC on Launch**
+enabled in ReimsBridge so the listener starts when the app opens.
+
+**Enable Start at Login** also tries to register the app directly. If macOS
+denies the request, ReimsBridge opens Login Item Settings for you. To undo
+a login item you added in System Settings, select it there and click **−**.
 
 Transfer statistics count text payloads and UTF-8 bytes for completed IPC
 exchanges. Sent counts report reads from the Mac pasteboard. Received
