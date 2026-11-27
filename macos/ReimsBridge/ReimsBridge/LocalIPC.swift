@@ -75,7 +75,8 @@ final class LocalIPC: ObservableObject {
                 timeInterval: 0.05,
                 repeats: true
             ) { [weak self] _ in
-                Task { @MainActor in
+                // This timer is scheduled only on the main run loop.
+                MainActor.assumeIsolated {
                     self?.acceptClients()
                 }
             }
@@ -174,11 +175,15 @@ final class LocalIPC: ObservableObject {
         // Never unlink the lock file: all instances must lock the same inode.
         let fd = Darwin.open(
             lockPath,
-            O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC,
+            O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_EXLOCK | O_NONBLOCK,
             mode_t(0o600)
         )
 
         guard fd >= 0 else {
+            if errno == EWOULDBLOCK {
+                throw IPCError(message: "Another ReimsBridge IPC listener is running")
+            }
+
             throw systemError("open listener lock")
         }
 
@@ -200,14 +205,6 @@ final class LocalIPC: ObservableObject {
               info.st_nlink == 1
         else {
             throw IPCError(message: "IPC listener lock is not private")
-        }
-
-        guard Darwin.flock(fd, LOCK_EX | LOCK_NB) == 0 else {
-            if errno == EWOULDBLOCK || errno == EAGAIN {
-                throw IPCError(message: "Another ReimsBridge IPC listener is running")
-            }
-
-            throw systemError("flock listener lock")
         }
 
         success = true
