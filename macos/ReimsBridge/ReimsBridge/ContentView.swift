@@ -23,6 +23,9 @@ struct ContentView: View {
         Text(ipc.isRunning
             ? "Service available to Windows"
             : "Service unavailable")
+        Text(ipc.watcherRecentlySeen
+            ? "Windows watcher: recently active"
+            : "Windows watcher: not detected")
         Text("Synchronization controlled by Windows")
         
         Divider()

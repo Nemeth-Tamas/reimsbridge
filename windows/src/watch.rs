@@ -12,12 +12,16 @@ use std::time::Duration;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 
-fn snapshot(session: &Session) -> Result<Option<Snapshot>, Box<dyn Error>> {
+fn snapshot(session: &Session, watch_status: bool) -> Result<Option<Snapshot>, Box<dyn Error>> {
     let Some(windows_before) = clipboard::metadata_checked()? else {
         return Ok(None);
     };
 
-    let mac = mac_ipc::get_status(session)?;
+    let mac = if watch_status {
+        mac_ipc::get_watch_status(session)?
+    } else {
+        mac_ipc::get_status(session)?
+    };
 
     let Some(windows_after) = clipboard::metadata_checked()? else {
         return Ok(None);
@@ -38,7 +42,7 @@ fn snapshot(session: &Session) -> Result<Option<Snapshot>, Box<dyn Error>> {
 }
 
 fn counters_current(session: &Session, expected: Counters) -> Result<bool, Box<dyn Error>> {
-    Ok(snapshot(session)?.is_some_and(|actual| still_current(expected, actual.counters)))
+    Ok(snapshot(session, false)?.is_some_and(|actual| still_current(expected, actual.counters)))
 }
 
 fn skip_if_current(
@@ -169,8 +173,9 @@ fn transfer(
 fn poll_once(
     session: &Session,
     engine: &mut SyncEngine,
+    watch_status: bool,
 ) -> Result<Option<Decision>, Box<dyn Error>> {
-    let Some(observed) = snapshot(session)? else {
+    let Some(observed) = snapshot(session, watch_status)? else {
         return Ok(None);
     };
 
@@ -206,7 +211,7 @@ fn poll_once(
 
 fn stable_counters(session: &Session) -> Result<Counters, Box<dyn Error>> {
     for _ in 0..10 {
-        if let Some(observed) = snapshot(session)? {
+        if let Some(observed) = snapshot(session, false)? {
             return Ok(observed.counters);
         }
 
@@ -248,7 +253,7 @@ fn expect_step(
     engine: &mut SyncEngine,
     expected: Decision,
 ) -> Result<(), Box<dyn Error>> {
-    let actual = poll_once(session, engine)?;
+    let actual = poll_once(session, engine, false)?;
 
     if actual != Some(expected) {
         return Err(format!(
@@ -521,8 +526,13 @@ pub fn run(session: &Session) -> Result<(), Box<dyn Error>> {
     println!("[WATCH] Privacy-marked text is allowed");
     println!("[WATCH] Press Ctrl+C to stop");
 
+    let watch_status = mac_ipc::get_status(session)?.watch_status_supported;
+    if watch_status {
+        println!("[WATCH] macOS watcher activity reporting enabled");
+    }
+
     loop {
-        let _ = poll_once(session, &mut engine)?;
+        let _ = poll_once(session, &mut engine, watch_status)?;
 
         thread::sleep(POLL_INTERVAL);
     }

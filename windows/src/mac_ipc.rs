@@ -20,6 +20,8 @@ pub struct MacStatus {
     pub change_count: i64,
     pub has_plain_text: bool,
     pub is_excluded: bool,
+    #[serde(default)]
+    pub watch_status_supported: bool,
 }
 
 fn parse_status(response: &[u8]) -> Result<MacStatus, Box<dyn Error>> {
@@ -86,6 +88,12 @@ fn query(
 
 pub fn get_status(session: &Session) -> Result<MacStatus, Box<dyn Error>> {
     let response = query(session, b"status\n", MAX_RESPONSE_BYTES)?;
+
+    parse_status(&response)
+}
+
+pub fn get_watch_status(session: &Session) -> Result<MacStatus, Box<dyn Error>> {
+    let response = query(session, b"watch-status\n", MAX_RESPONSE_BYTES)?;
 
     parse_status(&response)
 }
@@ -493,6 +501,35 @@ mod tests {
         assert_eq!(status.change_count, 14);
         assert!(status.has_plain_text);
         assert!(!status.is_excluded);
+        assert!(!status.watch_status_supported);
+    }
+
+    #[test]
+    fn watch_status_capability_detected() {
+        let response = br#"{
+            "protocol": 2,
+            "status": "ok",
+            "changeCount": 14,
+            "hasPlainText": true,
+            "isExcluded": false,
+            "watchStatusSupported": true
+        }"#;
+
+        assert!(parse_status(response).unwrap().watch_status_supported);
+    }
+
+    #[test]
+    fn malformed_watch_status_capability_rejected() {
+        let response = br#"{
+            "protocol": 2,
+            "status": "ok",
+            "changeCount": 14,
+            "hasPlainText": true,
+            "isExcluded": false,
+            "watchStatusSupported": "true"
+        }"#;
+
+        assert!(parse_status(response).is_err());
     }
 
     #[test]

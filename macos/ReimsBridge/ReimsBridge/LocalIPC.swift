@@ -24,6 +24,7 @@ final class LocalIPC: ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var status = "Stopped"
     @Published private(set) var requestCount = 0
+    @Published private(set) var watcherRecentlySeen = false
     
     private var listener: Int32 = -1
     private var timer: Timer?
@@ -32,6 +33,8 @@ final class LocalIPC: ObservableObject {
     private var clients: [Int32: IPCConnection] = [:]
 
     private let maxClients = 4
+    private let watcherTimeout: TimeInterval = 30
+    private var lastWatcherActivity: TimeInterval?
     
     private var directory: String {
         NSHomeDirectory() + "/.reimsbridge"
@@ -52,6 +55,8 @@ final class LocalIPC: ObservableObject {
             try startListener()
             
             requestCount = 0
+            lastWatcherActivity = nil
+            watcherRecentlySeen = false
             isRunning = true
             status = "Listening"
 
@@ -102,6 +107,8 @@ final class LocalIPC: ObservableObject {
             _ = Darwin.unlink(socketPath)
         }
         
+        lastWatcherActivity = nil
+        watcherRecentlySeen = false
         isRunning = false
         status = "Stopped"
     }
@@ -217,6 +224,12 @@ final class LocalIPC: ObservableObject {
             return
         }
 
+        if let lastWatcherActivity,
+           ProcessInfo.processInfo.systemUptime - lastWatcherActivity >= watcherTimeout {
+            self.lastWatcherActivity = nil
+            watcherRecentlySeen = false
+        }
+
         for fd in Array(clients.keys) {
             guard let connection = clients[fd] else {
                 continue
@@ -227,6 +240,12 @@ final class LocalIPC: ObservableObject {
                 continue
 
             case .finished:
+                if connection.isWatchStatus {
+                    lastWatcherActivity = ProcessInfo.processInfo.systemUptime
+                    if !watcherRecentlySeen {
+                        watcherRecentlySeen = true
+                    }
+                }
                 requestCount += 1
                 closeClient(fd)
 

@@ -30,6 +30,7 @@ host and a macOS guest running under Reims vGPU/QEMU.
 - 1 MiB plain-text clipboard size limit.
 - Native macOS menu bar application.
 - Foreground Windows synchronization command.
+- macOS menu bar watcher activity indicator (runtime verification pending).
 - No application-level clipboard history or content logging.
 
 ## Building
@@ -63,6 +64,14 @@ Once connected, ordinary Windows and macOS Copy/Paste
 operations automatically synchronize supported text.
 
 Press Ctrl+C in the Windows terminal to stop synchronization.
+
+Updated macOS and Windows companions support watcher-specific
+status requests. The macOS menu reports recent watcher activity
+for 30 seconds after the last completed watcher status request.
+Ordinary diagnostic requests do not activate the indicator.
+The indicator is a liveness hint, not proof of a successful
+transfer or a persistent connection. Older companions remain
+compatible with the original protocol 2 status request.
 
 Diagnostic and manual transfer commands:
 
@@ -251,6 +260,8 @@ transfers without unnecessary eager copying.
 - [x] M2.3C.3: Foreground automatic synchronization
 - [x] M2.3D: Automatic synchronization acceptance
 - [ ] M3: Complete native macOS menu bar interface
+- [x] M3.1: Correct service and privacy status display
+- [ ] M3.2: Watcher activity reporting (implementation pending runtime verification)
 - [ ] M4: Native Windows system tray companion
 - [ ] M5: Reconnection and credential management
 - [ ] M6: Multi-format clipboard protocol

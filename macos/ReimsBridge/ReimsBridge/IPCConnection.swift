@@ -24,6 +24,7 @@ final class IPCConnection {
     private var request = Data()
     private var response: Data?
     private var sentBytes = 0
+    private(set) var isWatchStatus = false
 
     private static let maxRequestBytes = 64
     private static let readChunkBytes = 64 * 1024
@@ -161,17 +162,19 @@ final class IPCConnection {
 
         let payloadStart = newline + 1
 
-        if header == "status" || header == "read" {
+        if header == "status" || header == "watch-status" || header == "read" {
             guard request.count == payloadStart else {
                 return finishRequest(
                     Data("ERR BAD_REQUEST\n".utf8)
                 )
             }
 
+            isWatchStatus = header == "watch-status"
+
             return finishRequest(
-                header == "status"
-                    ? statusResponse()
-                    : readResponse()
+                header == "read"
+                    ? readResponse()
+                    : statusResponse()
             )
         }
 
@@ -319,7 +322,7 @@ final class IPCConnection {
 
         let json =
             """
-            {"protocol":2,"status":"ok","changeCount":\(metadata.changeCount),"hasPlainText":\(metadata.hasPlainText),"isExcluded":\(metadata.isExcluded)}
+            {"protocol":2,"status":"ok","watchStatusSupported":true,"changeCount":\(metadata.changeCount),"hasPlainText":\(metadata.hasPlainText),"isExcluded":\(metadata.isExcluded)}
             """ + "\n"
 
         return Data(json.utf8)
