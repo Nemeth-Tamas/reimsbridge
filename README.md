@@ -30,7 +30,9 @@ host and a macOS guest running under Reims vGPU/QEMU.
 - 1 MiB plain-text clipboard size limit.
 - Native macOS menu bar application.
 - Foreground Windows synchronization command.
-- macOS menu bar watcher activity indicator (runtime verification pending).
+- macOS menu bar icon for IPC state and recent watcher activity.
+- Live macOS clipboard metadata and per-session IPC transfer statistics.
+- Persistent macOS preferences for IPC startup and statistics visibility.
 - No application-level clipboard history or content logging.
 
 ## Building
@@ -72,6 +74,23 @@ Ordinary diagnostic requests do not activate the indicator.
 The indicator is a liveness hint, not proof of a successful
 transfer or a persistent connection. Older companions remain
 compatible with the original protocol 2 status request.
+
+The macOS menu shows the current IPC state and recent Windows watcher
+activity. Clipboard metadata updates automatically, including while IPC is
+stopped. Clipboard validation and the private-pasteboard self-test are
+available under **Diagnostics**.
+
+Under **Preferences**, enable **Start IPC on Launch** to start the
+listener whenever ReimsBridge opens. Manual startup is the default.
+**Show Transfer Statistics** controls whether the menu displays session
+counters and is on by default. Both preferences persist across launches.
+Quitting the app stops the listener.
+
+Transfer statistics count text payloads and UTF-8 bytes for completed IPC
+exchanges. Sent counts report reads from the Mac pasteboard. Received
+counts report successful writes to it. A read can also serve a diagnostic
+or a watcher comparison. Counters reset when the listener starts and are
+held in memory.
 
 Diagnostic and manual transfer commands:
 
@@ -261,7 +280,12 @@ transfers without unnecessary eager copying.
 - [x] M2.3D: Automatic synchronization acceptance
 - [ ] M3: Complete native macOS menu bar interface
 - [x] M3.1: Correct service and privacy status display
-- [ ] M3.2: Watcher activity reporting (implementation pending runtime verification)
+- [ ] M3.2: Watcher activity reporting (watcher negotiation verified, menu acceptance pending)
+- [ ] M3.3: Dynamic menu bar icon (native acceptance pending)
+- [ ] M3.4: Live clipboard metadata (native acceptance pending)
+- [ ] M3.5: IPC transfer statistics (native acceptance pending)
+- [ ] M3.6: Persistent preferences (native acceptance pending)
+- [ ] M3.7: Menu bar integration acceptance
 - [ ] M4: Native Windows system tray companion
 - [ ] M5: Reconnection and credential management
 - [ ] M6: Multi-format clipboard protocol

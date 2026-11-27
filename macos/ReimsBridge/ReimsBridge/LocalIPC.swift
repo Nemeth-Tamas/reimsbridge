@@ -19,12 +19,37 @@ struct IPCError: LocalizedError {
 
 @MainActor
 final class LocalIPC: ObservableObject {
+    enum State {
+        case stopped(cleanupError: String?)
+        case listening(watcherRecentlySeen: Bool)
+        case failed(String)
+
+        var description: String {
+            switch self {
+            case .stopped(let cleanupError):
+                return cleanupError.map { "Stopped: \($0)" } ?? "Stopped"
+            case .listening:
+                return "Listening"
+            case .failed(let message):
+                return "Error: \(message)"
+            }
+        }
+    }
+
     static let shared = LocalIPC()
-    
-    @Published private(set) var isRunning = false
-    @Published private(set) var status = "Stopped"
-    @Published private(set) var requestCount = 0
-    @Published private(set) var watcherRecentlySeen = false
+
+    @Published private(set) var state: State = .stopped(cleanupError: nil)
+    let statistics = IPCStatistics()
+
+    var isRunning: Bool {
+        if case .listening = state { return true }
+        return false
+    }
+
+    var watcherRecentlySeen: Bool {
+        if case .listening(let recentlySeen) = state { return recentlySeen }
+        return false
+    }
     
     private var listener: Int32 = -1
     private var listenerLock: Int32 = -1
@@ -60,11 +85,9 @@ final class LocalIPC: ObservableObject {
         do {
             try startListener()
             
-            requestCount = 0
+            statistics.reset()
             lastWatcherActivity = nil
-            watcherRecentlySeen = false
-            isRunning = true
-            status = "Listening"
+            state = .listening(watcherRecentlySeen: false)
 
             activity = ProcessInfo.processInfo.beginActivity(
                 options: .userInitiatedAllowingIdleSystemSleep,
@@ -88,7 +111,7 @@ final class LocalIPC: ObservableObject {
                 forMode: .common
             )
         } catch {
-            status = "Error: \(error.localizedDescription)"
+            state = .failed(error.localizedDescription)
         }
     }
     
@@ -131,9 +154,7 @@ final class LocalIPC: ObservableObject {
         }
 
         lastWatcherActivity = nil
-        watcherRecentlySeen = false
-        isRunning = false
-        status = cleanupError.map { "Stopped: \($0)" } ?? "Stopped"
+        state = .stopped(cleanupError: cleanupError)
     }
     
     private func systemError(
@@ -394,7 +415,7 @@ final class LocalIPC: ObservableObject {
         if let lastWatcherActivity,
            ProcessInfo.processInfo.systemUptime - lastWatcherActivity >= watcherTimeout {
             self.lastWatcherActivity = nil
-            watcherRecentlySeen = false
+            state = .listening(watcherRecentlySeen: false)
         }
 
         for fd in Array(clients.keys) {
@@ -410,10 +431,10 @@ final class LocalIPC: ObservableObject {
                 if connection.isWatchStatus {
                     lastWatcherActivity = ProcessInfo.processInfo.systemUptime
                     if !watcherRecentlySeen {
-                        watcherRecentlySeen = true
+                        state = .listening(watcherRecentlySeen: true)
                     }
                 }
-                requestCount += 1
+                statistics.recordCompletedRequest(connection.transfer)
                 closeClient(fd)
 
             case .failed:

@@ -16,6 +16,11 @@ final class IPCConnection {
         case failed
     }
 
+    enum Transfer {
+        case sent(bytes: Int)
+        case received(bytes: Int)
+    }
+
     private let fd: Int32
 
     private let deadline =
@@ -25,6 +30,7 @@ final class IPCConnection {
     private var response: Data?
     private var sentBytes = 0
     private(set) var isWatchStatus = false
+    private(set) var transfer: Transfer?
 
     private static let maxRequestBytes = 64
     private static let readChunkBytes = 64 * 1024
@@ -299,6 +305,8 @@ final class IPCConnection {
                 return Data("ERR STALE\n".utf8)
             }
 
+            transfer = .received(bytes: payload.count)
+
             if expectedChangeCount != nil {
                 return Data(
                     "OK \(writtenChangeCount)\n".utf8
@@ -339,6 +347,7 @@ final class IPCConnection {
             )
 
             result.append(payload)
+            transfer = .sent(bytes: payload.count)
 
             return result
         } catch ClipboardError.noText {
