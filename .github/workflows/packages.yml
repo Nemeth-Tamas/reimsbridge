@@ -1,0 +1,69 @@
+name: Build unsigned packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/packages.yml"
+      - "packaging/**"
+      - "windows/**"
+      - "macos/**"
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows x64 installer
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Build installer
+        shell: pwsh
+        run: ./packaging/windows/build.ps1 -OutputDirectory dist
+      - name: Smoke test install and uninstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = "$env:RUNNER_TEMP\ReimsBridge-Install-Test"
+          $installer = (Resolve-Path 'dist/ReimsBridge-Windows-x64-Setup.exe').Path
+          $install = Start-Process -FilePath $installer -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/DIR="' + $app + '"')
+          ) -WindowStyle Hidden -PassThru -Wait
+          if ($install.ExitCode -ne 0) { throw "Installer exited with $($install.ExitCode)" }
+          if (-not (Test-Path -LiteralPath "$app\reimsbridge-tray.exe")) { throw 'Tray not installed' }
+          & "$app\reimsbridge-windows.exe" --help
+          if ($LASTEXITCODE -ne 0) { throw "Installed CLI exited with $LASTEXITCODE" }
+          $remove = Start-Process -FilePath "$app\unins000.exe" -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+          ) -WindowStyle Hidden -PassThru -Wait
+          if ($remove.ExitCode -ne 0 -or (Test-Path -LiteralPath "$app\reimsbridge-tray.exe")) {
+            throw "Installer smoke test could not uninstall ReimsBridge ($($remove.ExitCode))"
+          }
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/ReimsBridge-Windows-x64-Setup.exe
+          archive: false
+          if-no-files-found: error
+
+  macos:
+    name: macOS Intel app
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Build unsigned app archive
+        run: bash packaging/macos/build.sh dist
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/ReimsBridge-macOS-x86_64.zip
+          archive: false
+          if-no-files-found: error

@@ -42,6 +42,24 @@ host and a macOS guest running under Reims vGPU/QEMU.
 - Persistent macOS preferences for IPC startup and statistics visibility.
 - No application-level clipboard history or content logging.
 
+## Install
+
+Open the latest successful [Build unsigned packages run](https://github.com/Nemeth-Tamas/reimsbridge/actions/workflows/packages.yml)
+and download the artifact for your machine.
+
+- **Windows x64** · Download `ReimsBridge-Windows-x64-Setup.exe` and
+  double-click it. The per-user installer adds ReimsBridge to the Start
+  menu and offers to launch the tray after installation.
+- **Intel macOS guest** · Download `ReimsBridge-macOS-x86_64.zip`,
+  extract it, drag `ReimsBridge.app` to Applications, and open it from
+  Finder. If Gatekeeper asks for approval, use **Privacy & Security →
+  Open Anyway** for the downloaded app.
+
+These development packages are unsigned. Quit any running copy before
+installing an update. Start IPC in the macOS menu and connect from the
+Windows tray using your macOS SSH account. Login startup is available
+in both menus.
+
 ## Building
 
 Requires Rust, Cargo, MSVC build tools and Perl for the
@@ -424,7 +442,7 @@ transfers without unnecessary eager copying.
 - [ ] M5: Reconnection and credential management (saved credentials verified, reconnect acceptance pending)
 - [x] M6: Multi-format clipboard protocol
 - [x] M7: Native image and rich-text synchronization
-- [ ] M8: Streaming file transfer protocol (native fixtures passed, 1 GiB acceptance pending)
+- [x] M8: Streaming file transfer protocol (1 GiB SHA-256 verified in both directions)
 - [ ] M9: Transparent Explorer and Finder integration (native file lists passed, desktop paste check pending)
-- [ ] M10: Performance, security and reliability hardening (large-file and interrupted-transfer acceptance pending)
-- [ ] M11: Production packaging and release
+- [ ] M10: Performance, security and reliability hardening (large-file acceptance passed, interruption test pending)
+- [ ] M11: Production packaging and release (unsigned build and desktop acceptance pending)

@@ -31,3 +31,6 @@ xcuserdata/
 # Windows
 Thumbs.db
 Desktop.ini
+
+# Installers and app archives
+/dist/
