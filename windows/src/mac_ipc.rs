@@ -75,7 +75,7 @@ pub struct MacStatus {
     pub watch_status_supported: bool,
     #[serde(default)]
     pub file_transfer_version: u32,
-    #[serde(default)]
+    #[serde(default, rename = "hasFileURLs", alias = "hasFileUrls")]
     pub has_file_urls: bool,
     #[serde(default)]
     formats: Option<FormatStatus>,
@@ -787,6 +787,22 @@ mod tests {
         "hasPlainText": true,
         "isExcluded": false
     }"#;
+
+    #[test]
+    fn mac_status_recognizes_file_url_capability_and_availability() {
+        for field in ["hasFileURLs", "hasFileUrls"] {
+            for available in [false, true] {
+                let response = format!(
+                    r#"{{"protocol":2,"status":"ok","changeCount":42,"hasPlainText":false,"isExcluded":false,"fileTransferVersion":1,"{field}":{available}}}"#
+                );
+                let status = parse_status(response.as_bytes()).unwrap();
+                assert_eq!(status.file_transfer_version, 1);
+                assert_eq!(status.has_file_urls, available);
+            }
+        }
+
+        assert!(!parse_status(VALID_RESPONSE).unwrap().has_file_urls);
+    }
 
     #[test]
     fn valid_response() {
