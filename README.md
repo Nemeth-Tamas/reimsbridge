@@ -83,7 +83,7 @@ credential storage warning.
 **Stop Synchronization** cancels a pending retry or file transfer,
 finishes any current clipboard polling step, and ends the SSH session.
 The tray and foreground watcher share a single watcher slot, including
-during `watch-test`.
+during `watch-test` and `watch-test-large`.
 
 Choose **Enable Start at Login** in the Windows tray after saving your
 SSH login. This registers the current tray executable for the current
@@ -111,13 +111,24 @@ filesystem metadata are outside this initial path.
 
 Completed staged files remain under `%LOCALAPPDATA%\ReimsBridge\FileTransfers`
 on Windows and `~/.reimsbridge/transfers` on macOS. Keep them while a
-clipboard selection or paste still uses them. Failed batches are
-cleaned up when the transfer can reach its staging directory.
+clipboard selection or paste still uses them. Transfers write into
+`incoming-` directories and promote the completed batch before placing
+the file list on the destination clipboard. The watcher cleans up
+interrupted batches at startup or reconnect. Mac cleanup uses a
+journal tied to the verified SSH host and the Mac staging path.
+
+The file progress display reports bytes transferred, elapsed time,
+and average throughput.
 
 `watch-test` exercises a multi-root selection, nested and empty
 directories, and byte-for-byte file checks across both native
-clipboards. For large-file acceptance, copy a file of at least 1 GiB
-in each direction and compare SHA-256 hashes after pasting.
+clipboards. `watch-test-large` generates a 1 GiB fixture, copies
+it both ways through the clipboard path, and verifies SHA-256.
+Both tests replace both clipboards with their own fixtures. The
+large test reads the Mac file back for verification, and temporarily
+uses about 2 GiB on Windows and 1 GiB on macOS. It releases the test
+clipboard references and removes its own fixture and staging copies
+after a successful run.
 
 ### Foreground synchronization and diagnostics
 
@@ -221,6 +232,7 @@ cargo run -- mac-send <username>
 cargo run -- mac-receive <username>
 cargo run -- mac-conditional-test <username>
 cargo run -- watch-test <username>
+cargo run -- watch-test-large <username>
 ```
 
 Legacy pbcopy/pbpaste development commands:
@@ -242,6 +254,7 @@ cargo clippy --all-targets -- -D warnings
 cargo run -- clipboard-test
 cargo run -- mac-conditional-test <username>
 cargo run -- watch-test <username>
+cargo run -- watch-test-large <username>
 ```
 
 The macOS application also provides a native clipboard
@@ -411,7 +424,7 @@ transfers without unnecessary eager copying.
 - [ ] M5: Reconnection and credential management (saved credentials verified, reconnect acceptance pending)
 - [x] M6: Multi-format clipboard protocol
 - [x] M7: Native image and rich-text synchronization
-- [ ] M8: Streaming file transfer protocol (native and 1 GiB acceptance pending)
-- [ ] M9: Transparent Explorer and Finder integration (native acceptance pending)
-- [ ] M10: Performance, security and reliability hardening
+- [ ] M8: Streaming file transfer protocol (native fixtures passed, 1 GiB acceptance pending)
+- [ ] M9: Transparent Explorer and Finder integration (native file lists passed, desktop paste check pending)
+- [ ] M10: Performance, security and reliability hardening (large-file and interrupted-transfer acceptance pending)
 - [ ] M11: Production packaging and release

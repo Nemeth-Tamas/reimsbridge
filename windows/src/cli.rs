@@ -36,6 +36,7 @@ fn print_help() {
     println!("  reimsbridge-windows mac-conditional-test <username>");
     println!("  reimsbridge-windows watch <username>");
     println!("  reimsbridge-windows watch-test <username>");
+    println!("  reimsbridge-windows watch-test-large <username>");
     println!("  reimsbridge-windows send <username>");
     println!("  reimsbridge-windows receive <username>");
     println!("  reimsbridge-windows roundtrip-test <username>");
@@ -45,7 +46,6 @@ fn print_help() {
 
 pub fn run() -> Result<(), Box<dyn Error>> {
     println!("ReimsBridge v{}", env!("CARGO_PKG_VERSION"));
-    println!("M2.3D - Automatic synchronization acceptance");
     println!();
 
     let mut args = env::args().skip(1);
@@ -72,7 +72,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         | "mac-send"
         | "mac-conditional-test"
         | "watch"
-        | "watch-test" => {}
+        | "watch-test"
+        | "watch-test-large" => {}
         _ => {
             print_help();
             return Err("Unknown command".into());
@@ -85,7 +86,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         return Err("Unexpected command-line argument".into());
     }
 
-    let _watcher = if matches!(command.as_str(), "watch" | "watch-test") {
+    let _watcher = if matches!(
+        command.as_str(),
+        "watch" | "watch-test" | "watch-test-large"
+    ) {
         Some(InstanceGuard::watcher()?)
     } else {
         None
@@ -103,6 +107,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         "mac-conditional-test" => mac_ipc::test_checked_write(&session)?,
         "watch" => watch::run(&session)?,
         "watch-test" => watch::test(&session)?,
+        "watch-test-large" => watch::test_large_file(&session)?,
         "send" => sync::send(&session)?,
         "receive" => sync::receive(&session)?,
         "roundtrip-test" => sync::roundtrip_test(&session)?,

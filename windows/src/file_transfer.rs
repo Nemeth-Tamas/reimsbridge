@@ -1,5 +1,6 @@
 use crate::{clipboard, mac_ipc, sync_engine::Direction, sync_read::ReadOutcome};
-use ssh2::{ErrorCode, OpenFlags, OpenType, Session, Sftp};
+use sha2::{Digest, Sha256};
+use ssh2::{ErrorCode, HashType, OpenFlags, OpenType, RenameFlags, Session, Sftp};
 use std::collections::HashSet;
 use std::error::Error;
 use std::ffi::OsStr;
@@ -100,7 +101,9 @@ pub fn transfer(
             let root = mac_ipc::file_stage(session)?;
             validate_mac_path(&root)?;
             let destination = remote_child(&root, &batch)?;
-            let mut stage = RemoteStage::create(&sftp, destination)?;
+            let pending = remote_child(&root, &format!("incoming-{batch}"))?;
+            let journal = journal_root(session, &root)?.join(&batch);
+            let mut stage = RemoteStage::create(&sftp, pending, journal)?;
             for (source, name) in roots {
                 upload(
                     &sftp,
@@ -115,7 +118,12 @@ pub fn transfer(
                 return Ok(ResultState::Changed);
             }
 
-            // Keep the staged files if the publish acknowledgement is lost.
+            stage.promote(destination)?;
+            progress.check_cancelled()?;
+            if !still_current()? {
+                return Ok(ResultState::Changed);
+            }
+            // A lost acknowledgement can leave the clipboard pointing here.
             stage.keep = true;
             let result = mac_ipc::file_publish(session, mac_counter, &batch)?;
             if let Some(counter) = result {
@@ -128,18 +136,24 @@ pub fn transfer(
         }
         Direction::MacToWindows => {
             let root = windows_stage_root()?;
-            let mut stage = LocalStage::create(root.join(&batch))?;
-            let mut published = Vec::with_capacity(roots.len());
-            for (source, name) in roots {
-                let destination = stage.path.join(name);
-                download(&sftp, source, &destination, 0, &mut progress)?;
-                published.push(destination);
+            let mut stage = LocalStage::create(root.join(format!("incoming-{batch}")))?;
+            for (source, name) in &roots {
+                download(&sftp, source, &stage.path.join(name), 0, &mut progress)?;
             }
             progress.check_cancelled()?;
             if !still_current()? {
                 return Ok(ResultState::Changed);
             }
 
+            stage.promote(root.join(&batch))?;
+            progress.check_cancelled()?;
+            if !still_current()? {
+                return Ok(ResultState::Changed);
+            }
+            let published: Vec<_> = roots
+                .iter()
+                .map(|(_, name)| stage.path.join(name))
+                .collect();
             stage.keep = true;
             let result = clipboard::write_files_checked(&published, windows_counter)?;
             if let Some(counter) = result {
@@ -215,25 +229,165 @@ fn remote_child(parent: &Path, name: &str) -> Result<PathBuf, Box<dyn Error>> {
     Ok(PathBuf::from(format!("{parent}/{name}")))
 }
 
-fn windows_stage_root() -> Result<PathBuf, Box<dyn Error>> {
+fn service_root() -> Result<PathBuf, Box<dyn Error>> {
     let base = PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA unavailable")?);
     if !base.is_absolute() {
         return Err("LOCALAPPDATA is not absolute".into());
     }
     let service = base.join("ReimsBridge");
-    let transfers = service.join("FileTransfers");
-    for directory in [&service, &transfers] {
-        match fs::create_dir(directory) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
+    ensure_directory(&service)?;
+    Ok(service)
+}
+
+fn windows_stage_root() -> Result<PathBuf, Box<dyn Error>> {
+    let root = service_root()?.join("FileTransfers");
+    ensure_directory(&root)?;
+    Ok(root)
+}
+
+fn ensure_directory(directory: &Path) -> Result<(), Box<dyn Error>> {
+    match fs::create_dir(directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    if !ordinary_metadata(directory)?.is_dir() {
+        return Err("ReimsBridge staging path is not a directory".into());
+    }
+    Ok(())
+}
+
+fn journal_root(session: &Session, remote_root: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    let journal = service_root()?.join("TransferJournal");
+    ensure_directory(&journal)?;
+    let host_key = session
+        .host_key_hash(HashType::Sha256)
+        .ok_or("SSH host key hash unavailable")?;
+    let mut identity = Sha256::new();
+    identity.update(host_key);
+    identity.update(validate_mac_path(remote_root)?.as_bytes());
+    let account = journal.join(format!("{:x}", identity.finalize()));
+    ensure_directory(&account)?;
+    Ok(account)
+}
+
+fn valid_batch(batch: &str) -> bool {
+    let Some(value) = batch.strip_prefix("batch-") else {
+        return false;
+    };
+    let mut components = value.split('-');
+    let valid = (0..3).all(|_| {
+        components.next().is_some_and(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+    });
+    valid && components.next().is_none() && batch.len() <= 64
+}
+
+pub fn recover_interrupted(session: &Session, stop: &AtomicBool) -> Result<usize, Box<dyn Error>> {
+    let mut cleaned = 0;
+    let local = windows_stage_root()?;
+    for entry in fs::read_dir(local)? {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(cleaned);
         }
-        let stat = ordinary_metadata(directory)?;
-        if !stat.is_dir() {
-            return Err("ReimsBridge staging path is not a directory".into());
+        let entry = entry?;
+        let name = entry.file_name();
+        let pending = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("incoming-"));
+        if pending.is_some_and(valid_batch)
+            && ordinary_metadata(&entry.path()).is_ok_and(|stat| stat.is_dir())
+        {
+            fs::remove_dir_all(entry.path())?;
+            cleaned += 1;
         }
     }
-    Ok(transfers)
+
+    let remote = mac_ipc::file_stage(session)?;
+    let journal = journal_root(session, &remote)?;
+    let mut sftp = None;
+    for entry in fs::read_dir(journal)? {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(batch) = name.to_str().filter(|name| valid_batch(name)) else {
+            continue;
+        };
+        if !ordinary_metadata(&entry.path()).is_ok_and(|stat| stat.is_file() && stat.len() == 0) {
+            continue;
+        }
+
+        let transport = match &sftp {
+            Some(transport) => transport,
+            None => sftp.insert(session.sftp()?),
+        };
+        let pending = remote_child(&remote, &format!("incoming-{batch}"))?;
+        if clear_remote_pending(transport, &pending)? {
+            cleaned += 1;
+        }
+        fs::remove_file(entry.path())?;
+    }
+    Ok(cleaned)
+}
+
+pub fn clear_test_staging(
+    session: &Session,
+    windows_file: &Path,
+    mac_file: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let windows_stage = windows_file
+        .parent()
+        .ok_or("Windows test staging path unavailable")?;
+    let mac_stage = validate_mac_path(mac_file)?
+        .rsplit_once('/')
+        .ok_or("Mac test staging path unavailable")?
+        .0;
+    let (mac_root, mac_batch) = mac_stage
+        .rsplit_once('/')
+        .ok_or("Mac test batch path unavailable")?;
+    let windows_batch = windows_stage
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or("Windows test batch name unavailable")?;
+    if !valid_batch(windows_batch)
+        || !valid_batch(mac_batch)
+        || windows_stage.parent() != Some(windows_stage_root()?.as_path())
+        || Path::new(mac_root) != mac_ipc::file_stage(session)?
+        || !ordinary_metadata(windows_stage)?.is_dir()
+    {
+        return Err("Test staging cleanup paths are outside their expected directories".into());
+    }
+
+    fs::remove_dir_all(windows_stage)?;
+    clear_remote_pending(&session.sftp()?, Path::new(mac_stage))?;
+    Ok(())
+}
+
+fn clear_remote_pending(sftp: &Sftp, pending: &Path) -> Result<bool, Box<dyn Error>> {
+    match sftp.lstat(pending) {
+        Ok(stat) if stat.is_dir() => {
+            remove_remote_tree(sftp, pending, 0)?;
+            Ok(true)
+        }
+        Ok(_) => Err("Remote pending path was not an ordinary directory".into()),
+        Err(error)
+            if matches!(
+                error.code(),
+                ErrorCode::SFTP(
+                    libssh2_sys::LIBSSH2_FX_NO_SUCH_FILE | libssh2_sys::LIBSSH2_FX_NO_SUCH_PATH
+                )
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn ordinary_metadata(path: &Path) -> Result<Metadata, Box<dyn Error>> {
@@ -246,7 +400,7 @@ fn ordinary_metadata(path: &Path) -> Result<Metadata, Box<dyn Error>> {
     Ok(stat)
 }
 
-fn check_windows_space(file: &Path, length: u64) -> Result<(), Box<dyn Error>> {
+pub(crate) fn check_windows_space(file: &Path, length: u64) -> Result<(), Box<dyn Error>> {
     if length < SPACE_CHECK_THRESHOLD {
         return Ok(());
     }
@@ -303,6 +457,12 @@ impl LocalStage {
         fs::create_dir(&path)?;
         Ok(Self { path, keep: false })
     }
+
+    fn promote(&mut self, destination: PathBuf) -> io::Result<()> {
+        fs::rename(&self.path, &destination)?;
+        self.path = destination;
+        Ok(())
+    }
 }
 
 impl Drop for LocalStage {
@@ -316,24 +476,47 @@ impl Drop for LocalStage {
 struct RemoteStage<'a> {
     sftp: &'a Sftp,
     path: PathBuf,
+    journal: Option<PathBuf>,
     keep: bool,
 }
 
 impl<'a> RemoteStage<'a> {
-    fn create(sftp: &'a Sftp, path: PathBuf) -> Result<Self, ssh2::Error> {
+    fn create(sftp: &'a Sftp, path: PathBuf, journal: PathBuf) -> Result<Self, Box<dyn Error>> {
         sftp.mkdir(&path, 0o700)?;
-        Ok(Self {
+        let mut stage = Self {
             sftp,
             path,
+            journal: None,
             keep: false,
-        })
+        };
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&journal)?;
+        // The journal exists before the first file byte is written.
+        stage.journal = Some(journal);
+        Ok(stage)
+    }
+
+    fn promote(&mut self, destination: PathBuf) -> Result<(), ssh2::Error> {
+        self.sftp
+            .rename(&self.path, &destination, Some(RenameFlags::empty()))?;
+        self.path = destination;
+        self.clear_journal();
+        Ok(())
+    }
+
+    fn clear_journal(&mut self) {
+        if let Some(journal) = self.journal.take() {
+            let _ = fs::remove_file(journal);
+        }
     }
 }
 
 impl Drop for RemoteStage<'_> {
     fn drop(&mut self) {
-        if !self.keep {
-            let _ = remove_remote_tree(self.sftp, &self.path, 0);
+        if !self.keep && clear_remote_pending(self.sftp, &self.path).is_ok() {
+            self.clear_journal();
         }
     }
 }
@@ -487,6 +670,7 @@ struct Progress<'a> {
     still_current: &'a dyn Fn() -> Result<bool, Box<dyn Error>>,
     buffer: Vec<u8>,
     bytes: u64,
+    started: Instant,
     last_report: Instant,
 }
 
@@ -500,6 +684,7 @@ impl<'a> Progress<'a> {
             still_current,
             buffer: vec![0; BUFFER_BYTES],
             bytes: 0,
+            started: Instant::now(),
             last_report: Instant::now(),
         }
     }
@@ -512,7 +697,16 @@ impl<'a> Progress<'a> {
     }
 
     fn complete(&self) {
-        self.report(&format!("Ready to paste: {} bytes staged", self.bytes));
+        self.report(&format!(
+            "Ready to paste: {} bytes staged in {:.2}s ({:.2} MiB/s)",
+            self.bytes,
+            self.started.elapsed().as_secs_f64(),
+            self.rate()
+        ));
+    }
+
+    fn rate(&self) -> f64 {
+        (self.bytes as f64 / 1_048_576.0) / self.started.elapsed().as_secs_f64().max(0.001)
     }
 
     fn check_cancelled(&self) -> io::Result<()> {
@@ -570,8 +764,9 @@ impl<'a> Progress<'a> {
                 return Err(SelectionChanged.into());
             }
             self.report(&format!(
-                "Transferring clipboard files: {} MiB",
-                self.bytes / 1_048_576
+                "Transferring clipboard files: {} MiB ({:.2} MiB/s)",
+                self.bytes / 1_048_576,
+                self.rate()
             ));
             self.last_report = Instant::now();
         }
@@ -637,5 +832,33 @@ mod tests {
             .unwrap();
         assert_eq!(progress.bytes, length);
         assert_eq!(progress.buffer.len(), BUFFER_BYTES);
+    }
+
+    #[test]
+    fn staging_is_promoted_and_unpublished_batches_are_removed() {
+        let parent =
+            std::env::temp_dir().join(format!("ReimsBridge-staging-{}", batch_id().unwrap()));
+        fs::create_dir(&parent).unwrap();
+        let pending = parent.join("incoming-batch-1-2-3");
+        let ready = parent.join("batch-1-2-3");
+        {
+            let mut stage = LocalStage::create(pending.clone()).unwrap();
+            fs::write(stage.path.join("fixture"), b"ready").unwrap();
+            stage.promote(ready.clone()).unwrap();
+            stage.keep = true;
+        }
+        assert!(!pending.exists());
+        assert_eq!(fs::read(ready.join("fixture")).unwrap(), b"ready");
+
+        {
+            let stage = LocalStage::create(pending.clone()).unwrap();
+            fs::write(stage.path.join("fixture"), b"partial").unwrap();
+        }
+        assert!(!pending.exists());
+        assert!(ready.is_dir());
+        assert!(valid_batch("batch-1a-02-f00"));
+        assert!(!valid_batch("batch-1-../2-3"));
+        assert!(!valid_batch("batch-1-2-3-extra"));
+        fs::remove_dir_all(parent).unwrap();
     }
 }

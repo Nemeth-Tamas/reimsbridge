@@ -464,7 +464,7 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
         ..WatchOptions::default()
     };
 
-    println!("[ACCEPTANCE] M2.3D automatic synchronization");
+    println!("[ACCEPTANCE] ReimsBridge automatic clipboard synchronization");
     println!(
         "[ACCEPTANCE] Clipboard framing: {}",
         options.transport.description()
@@ -828,6 +828,140 @@ fn test_files(
     Ok(())
 }
 
+pub fn test_large_file(session: &Session) -> Result<(), Box<dyn Error>> {
+    use sha2::{Digest, Sha256};
+    use std::fs::{self, File};
+    use std::io::{Read, Write};
+    use std::path::Path;
+    use std::time::Instant;
+
+    const BYTES: u64 = 1 << 30;
+    const BLOCK: usize = 256 * 1024;
+    const NAME: &str = "ReimsBridge-1GiB.bin";
+
+    fn hash_file(mut file: impl Read, expected_length: u64) -> Result<[u8; 32], Box<dyn Error>> {
+        let mut digest = Sha256::new();
+        let mut block = vec![0; BLOCK];
+        let mut total = 0;
+        loop {
+            let read = file.read(&mut block)?;
+            if read == 0 {
+                break;
+            }
+            total += read as u64;
+            if total > expected_length {
+                return Err("Test copy exceeded its expected length".into());
+            }
+            digest.update(&block[..read]);
+        }
+        if total != expected_length {
+            return Err("Test copy ended before its expected length".into());
+        }
+        Ok(digest.finalize().into())
+    }
+
+    let peer = mac_ipc::get_status(session)?;
+    if peer.file_transfer_version != 1 {
+        return Err("The Mac companion must advertise file transfers".into());
+    }
+    let options = WatchOptions {
+        files: true,
+        ..WatchOptions::default()
+    };
+    let fixture =
+        std::env::temp_dir().join(format!("ReimsBridge-check-{}", file_transfer::batch_id()?));
+    fs::create_dir(&fixture)?;
+    let source = fixture.join(NAME);
+    file_transfer::check_windows_space(&source, BYTES)?;
+
+    println!("[ACCEPTANCE] Both clipboards will be replaced. Creating a 1 GiB fixture.");
+    println!("[ACCEPTANCE] Fixture directory: {}", fixture.display());
+    let mut file = File::create(&source)?;
+    let mut block = vec![0x95; BLOCK];
+    let mut digest = Sha256::new();
+    for index in 0..(BYTES / BLOCK as u64) {
+        block[..8].copy_from_slice(&index.to_le_bytes());
+        file.write_all(&block)?;
+        digest.update(&block);
+    }
+    file.sync_all()?;
+    drop(file);
+    let expected: [u8; 32] = digest.finalize().into();
+
+    let mut engine = SyncEngine::new();
+    expect_step(session, &mut engine, options, Decision::Baseline)?;
+    let before = stable_counters(session)?;
+    clipboard::write_files_checked(&[source], before.windows)?
+        .ok_or("Windows clipboard changed before the file test")?;
+
+    let started = Instant::now();
+    expect_step(
+        session,
+        &mut engine,
+        options,
+        Decision::Transfer(Direction::WindowsToMac),
+    )?;
+    let upload_time = started.elapsed();
+    let after_upload = stable_counters(session)?;
+    let ReadOutcome::Data(mac_files) = mac_ipc::file_offer(session, after_upload.mac)? else {
+        return Err("Mac clipboard is missing the large file".into());
+    };
+    let [mac_file] = mac_files.as_slice() else {
+        return Err("Expected one Mac file".into());
+    };
+    let mac_file_path = Path::new(mac_file);
+    let (stage, filename) = mac_file.rsplit_once('/').ok_or("Invalid Mac file path")?;
+    let batch = stage.rsplit('/').next().ok_or("Invalid Mac batch path")?;
+    if filename != NAME {
+        return Err("Unexpected Mac test filename".into());
+    }
+    let sftp = session.sftp()?;
+    if hash_file(sftp.open(mac_file_path)?, BYTES)? != expected {
+        return Err("Windows to Mac SHA-256 mismatch".into());
+    }
+    println!(
+        "[PASS] Windows to macOS: 1 GiB in {:.2}s, SHA-256 matched",
+        upload_time.as_secs_f64()
+    );
+
+    mac_ipc::file_publish(session, after_upload.mac, batch)?
+        .ok_or("Mac clipboard changed before the return test")?;
+    let started = Instant::now();
+    expect_step(
+        session,
+        &mut engine,
+        options,
+        Decision::Transfer(Direction::MacToWindows),
+    )?;
+    let download_time = started.elapsed();
+    let after_download = stable_counters(session)?;
+    let ReadOutcome::Data(windows_files) = clipboard::read_files(after_download.windows)? else {
+        return Err("Windows clipboard is missing the large file".into());
+    };
+    let [windows_file] = windows_files.as_slice() else {
+        return Err("Expected one Windows file".into());
+    };
+    if windows_file.file_name().is_none_or(|name| name != NAME)
+        || hash_file(File::open(windows_file)?, BYTES)? != expected
+    {
+        return Err("Mac to Windows SHA-256 mismatch".into());
+    }
+    println!(
+        "[PASS] macOS to Windows: 1 GiB in {:.2}s, SHA-256 matched",
+        download_time.as_secs_f64()
+    );
+
+    let done = "ReimsBridge 1 GiB SHA-256 acceptance passed";
+    clipboard::write_text_checked(done, Some(after_download.windows))?
+        .ok_or("Windows clipboard changed before test cleanup")?;
+    mac_ipc::write_text_checked(session, done, after_download.mac)?
+        .ok_or("Mac clipboard changed before test cleanup")?;
+    file_transfer::clear_test_staging(session, windows_file, mac_file_path)?;
+    fs::remove_dir_all(fixture)?;
+    println!("[PASS] Large-file acceptance complete");
+    Ok(())
+}
+
 fn test_bundles(
     session: &Session,
     engine: &mut SyncEngine,
@@ -927,6 +1061,19 @@ pub fn run_until_stopped(
 
     if options.files {
         println!("[WATCH] Streaming file and folder copies enabled");
+        match file_transfer::recover_interrupted(session, stop) {
+            Ok(0) => {}
+            Ok(cleaned) => {
+                let message = format!("Recovered {cleaned} interrupted file transfer batch(es)");
+                println!("[FILES] {message}");
+                file_notice(&message);
+            }
+            Err(error) => {
+                let message = format!("Could not finish staging recovery: {error}");
+                eprintln!("[FILES] {message}");
+                file_notice(&message);
+            }
+        }
     }
 
     if options.watch_status {
