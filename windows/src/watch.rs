@@ -7,6 +7,7 @@ use crate::{clipboard, mac_ipc};
 
 use ssh2::Session;
 use std::error::Error;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -517,6 +518,15 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
 }
 
 pub fn run(session: &Session) -> Result<(), Box<dyn Error>> {
+    println!("[WATCH] Press Ctrl+C to stop");
+    run_until_stopped(session, &AtomicBool::new(false), || {})
+}
+
+pub fn run_until_stopped(
+    session: &Session,
+    stop: &AtomicBool,
+    on_active: impl Fn(),
+) -> Result<(), Box<dyn Error>> {
     let mut engine = SyncEngine::new();
 
     println!("[WATCH] Starting native clipboard synchronization");
@@ -524,16 +534,23 @@ pub fn run(session: &Session) -> Result<(), Box<dyn Error>> {
     println!("[WATCH] Poll interval: {} ms", POLL_INTERVAL.as_millis());
 
     println!("[WATCH] Privacy-marked text is allowed");
-    println!("[WATCH] Press Ctrl+C to stop");
+
+    if stop.load(Ordering::Relaxed) {
+        return Ok(());
+    }
 
     let watch_status = mac_ipc::get_status(session)?.watch_status_supported;
     if watch_status {
         println!("[WATCH] macOS watcher activity reporting enabled");
     }
 
-    loop {
-        let _ = poll_once(session, &mut engine, watch_status)?;
+    while !stop.load(Ordering::Relaxed) {
+        if poll_once(session, &mut engine, watch_status)? == Some(Decision::Baseline) {
+            on_active();
+        }
 
         thread::sleep(POLL_INTERVAL);
     }
+
+    Ok(())
 }
