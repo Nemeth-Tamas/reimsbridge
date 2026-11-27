@@ -93,7 +93,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
     let session = ssh::connect_verified()?;
     let password = rpassword::prompt_password(format!("{username}@{}'s password: ", ssh::HOST))?;
-    ssh::authenticate(&session, &username, ssh::Password::new(password))?;
+    ssh::authenticate(&session, &username, &ssh::Password::new(password))?;
 
     match command.as_str() {
         "ssh-test" => transport_test(&session)?,

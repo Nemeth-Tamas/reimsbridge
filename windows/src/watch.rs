@@ -525,7 +525,7 @@ pub fn run(session: &Session) -> Result<(), Box<dyn Error>> {
 pub fn run_until_stopped(
     session: &Session,
     stop: &AtomicBool,
-    on_active: impl Fn(),
+    mut on_active: impl FnMut(),
 ) -> Result<(), Box<dyn Error>> {
     let mut engine = SyncEngine::new();
 

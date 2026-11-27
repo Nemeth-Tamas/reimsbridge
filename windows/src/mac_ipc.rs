@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use ssh2::{ExtendedData, Session};
 use std::error::Error;
+use std::fmt;
 use std::io::{Read, Write};
 
 use crate::sync_read::ReadOutcome;
@@ -43,6 +44,21 @@ fn parse_status(response: &[u8]) -> Result<MacStatus, Box<dyn Error>> {
     Ok(status)
 }
 
+#[derive(Debug)]
+struct Unavailable(String);
+
+impl fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Error for Unavailable {}
+
+pub fn is_unavailable(error: &(dyn Error + 'static)) -> bool {
+    error.is::<Unavailable>()
+}
+
 fn query(
     session: &Session,
     request: &[u8],
@@ -53,15 +69,18 @@ fn query(
     channel.handle_extended_data(ExtendedData::Ignore)?;
     channel.exec(IPC_COMMAND)?;
 
-    channel.write_all(request)?;
-    channel.flush()?;
+    channel
+        .write_all(request)
+        .and_then(|()| channel.flush())
+        .map_err(|error| Unavailable(error.to_string()))?;
     channel.send_eof()?;
 
     let mut response = Vec::new();
 
     (&mut channel)
         .take((max_response_bytes + 1) as u64)
-        .read_to_end(&mut response)?;
+        .read_to_end(&mut response)
+        .map_err(|error| Unavailable(error.to_string()))?;
 
     if response.len() > max_response_bytes {
         return Err("IPC response exceeds size limit".into());
@@ -70,17 +89,18 @@ fn query(
     channel.wait_close()?;
 
     if channel.exit_status()? != 0 {
-        return Err("Cannot reach macOS IPC service. \
-             Is ReimsBridge running with IPC enabled?"
-            .into());
+        return Err(Unavailable(
+            "Cannot reach macOS IPC service. Is ReimsBridge running with IPC enabled?".into(),
+        )
+        .into());
     }
 
     if channel.exit_signal()?.exit_signal.is_some() {
-        return Err("macOS IPC command was terminated".into());
+        return Err(Unavailable("macOS IPC command was terminated".into()).into());
     }
 
     if response.is_empty() {
-        return Err("macOS IPC returned no response".into());
+        return Err(Unavailable("macOS IPC returned no response".into()).into());
     }
 
     Ok(response)

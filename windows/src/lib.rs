@@ -11,6 +11,7 @@ mod sync_read;
 mod tray;
 mod validation;
 mod watch;
+mod watch_worker;
 
 pub use cli::run as run_cli;
 pub use tray::{run as run_tray, show_launch_error};

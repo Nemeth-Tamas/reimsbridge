@@ -1,13 +1,11 @@
-use crate::credentials::{self, Credentials};
+use crate::credentials;
 use crate::instance::InstanceGuard;
-use crate::{ssh, watch};
+use crate::watch_worker::{Update, Worker};
 use std::error::Error;
 use std::io;
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::thread::{self, JoinHandle};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Shell::{
@@ -18,10 +16,11 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
     DispatchMessageW, GetCursorPos, GetMessageW, IDI_APPLICATION, IDI_INFORMATION, IDI_WARNING,
-    KillTimer, LoadIconW, MB_ICONERROR, MB_OK, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG,
-    MessageBoxW, PostMessageW, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow,
-    SetTimer, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
-    WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW, WS_POPUP,
+    KillTimer, LoadIconW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MF_GRAYED, MF_SEPARATOR,
+    MF_STRING, MSG, MessageBoxW, PostMessageW, RegisterClassW, RegisterWindowMessageW,
+    SetForegroundWindow, SetTimer, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+    TranslateMessage, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
+    WNDCLASSW, WS_POPUP,
 };
 use windows_sys::core::{PCWSTR, w};
 
@@ -35,16 +34,20 @@ const START: usize = 1;
 const STOP: usize = 2;
 const VIEW_ERROR: usize = 3;
 const QUIT: usize = 4;
+const START_DIFFERENT: usize = 5;
+const FORGET_SAVED: usize = 6;
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 static RESTORE_ICON: AtomicBool = AtomicBool::new(false);
 static ICON_VERSION_4: AtomicBool = AtomicBool::new(false);
 static CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Status {
+    #[default]
     Stopped,
     Connecting,
+    Reconnecting,
     Syncing,
     Stopping,
     Error,
@@ -55,6 +58,7 @@ impl Status {
         match self {
             Self::Stopped => "Stopped",
             Self::Connecting => "Connecting",
+            Self::Reconnecting => "Reconnecting",
             Self::Syncing => "Synchronizing",
             Self::Stopping => "Stopping",
             Self::Error => "Connection error",
@@ -64,71 +68,18 @@ impl Status {
     fn icon(self) -> PCWSTR {
         match self {
             Self::Syncing => IDI_INFORMATION,
-            Self::Error => IDI_WARNING,
+            Self::Error | Self::Reconnecting => IDI_WARNING,
             _ => IDI_APPLICATION,
         }
     }
 }
 
-struct Worker {
-    stop: Arc<AtomicBool>,
-    active: Arc<AtomicBool>,
-    thread: JoinHandle<Result<(), String>>,
-}
-
-impl Worker {
-    fn start(credentials: Credentials) -> io::Result<Self> {
-        let stop = Arc::new(AtomicBool::new(false));
-        let active = Arc::new(AtomicBool::new(false));
-        let worker_stop = Arc::clone(&stop);
-        let worker_active = Arc::clone(&active);
-        let thread = thread::Builder::new()
-            .name("reimsbridge-watch".into())
-            .spawn(move || {
-                sync_worker(credentials, &worker_stop, &worker_active).map_err(|e| e.to_string())
-            })?;
-
-        Ok(Self {
-            stop,
-            active,
-            thread,
-        })
-    }
-
-    fn request_stop(&self) {
-        self.stop.store(true, Ordering::Relaxed);
-    }
-}
-
-fn sync_worker(
-    credentials: Credentials,
-    stop: &AtomicBool,
-    active: &AtomicBool,
-) -> Result<(), Box<dyn Error>> {
-    let _watcher = InstanceGuard::watcher()?;
-    if stop.load(Ordering::Relaxed) {
-        return Ok(());
-    }
-
-    let session = ssh::connect_verified()?;
-    if stop.load(Ordering::Relaxed) {
-        return Ok(());
-    }
-
-    ssh::authenticate(&session, &credentials.username, credentials.password)?;
-    let result = watch::run_until_stopped(&session, stop, || {
-        active.store(true, Ordering::Relaxed);
-    });
-
-    if result.is_ok() {
-        let _ = session.disconnect(None, "ReimsBridge session complete", None);
-    }
-    result
-}
-
 #[derive(Default)]
 struct TrayState {
     worker: Option<Worker>,
+    phase: Status,
+    retry_details: Option<String>,
+    credential_warning: Option<String>,
     error: Option<String>,
     quitting: bool,
 }
@@ -136,23 +87,41 @@ struct TrayState {
 impl TrayState {
     fn status(&self) -> Status {
         match &self.worker {
-            Some(worker) if worker.stop.load(Ordering::Relaxed) => Status::Stopping,
-            Some(worker) if worker.active.load(Ordering::Relaxed) => Status::Syncing,
-            Some(_) => Status::Connecting,
+            Some(worker) if worker.stopping() => Status::Stopping,
+            Some(_) => self.phase,
             None if self.error.is_some() => Status::Error,
             None => Status::Stopped,
         }
     }
 
-    fn start(&mut self, owner: HWND) {
+    fn start(&mut self, owner: HWND, use_saved: bool) {
         if self.worker.is_some() || self.quitting {
             return;
         }
 
-        match credentials::prompt(owner) {
+        let mut credential_warning = None;
+        let result = if use_saved {
+            match credentials::load_saved() {
+                Ok(Some(credentials)) => Ok(Some(credentials)),
+                Ok(None) => credentials::prompt(owner),
+                Err(error) => {
+                    credential_warning = Some(format!(
+                        "Could not read saved SSH credentials from Windows Credential Manager: {error}"
+                    ));
+                    credentials::prompt(owner)
+                }
+            }
+        } else {
+            credentials::prompt(owner)
+        };
+
+        match result {
             Ok(Some(credentials)) => match Worker::start(credentials) {
                 Ok(worker) => {
+                    self.phase = Status::Connecting;
                     self.error = None;
+                    self.retry_details = None;
+                    self.credential_warning = credential_warning;
                     self.worker = Some(worker);
                 }
                 Err(error) => self.error = Some(error.to_string()),
@@ -160,6 +129,20 @@ impl TrayState {
             Ok(None) => {}
             Err(error) => self.error = Some(error.to_string()),
         }
+    }
+
+    fn forget_saved(&mut self) {
+        if self.worker.is_none() {
+            self.error = credentials::forget().err().map(|error| error.to_string());
+            self.credential_warning = None;
+        }
+    }
+
+    fn details(&self) -> Option<&str> {
+        self.error
+            .as_deref()
+            .or(self.retry_details.as_deref())
+            .or(self.credential_warning.as_deref())
     }
 
     fn stop(&self) {
@@ -174,11 +157,31 @@ impl TrayState {
     }
 
     fn update_worker(&mut self) {
+        if let Some(worker) = &self.worker {
+            for update in worker.updates.try_iter() {
+                match update {
+                    Update::Active => {
+                        self.phase = Status::Syncing;
+                        self.retry_details = None;
+                    }
+                    Update::Reconnecting { delay, reason } => {
+                        self.phase = Status::Reconnecting;
+                        self.retry_details = Some(format!(
+                            "{reason}\n\nRetry delay: {} seconds",
+                            delay.as_secs()
+                        ));
+                    }
+                    Update::CredentialWarning(warning) => self.credential_warning = Some(warning),
+                }
+            }
+        }
+
         let Some(worker) = self.worker.take_if(|worker| worker.thread.is_finished()) else {
             return;
         };
 
-        let stopped = worker.stop.load(Ordering::Relaxed);
+        let stopped = worker.stopping();
+        self.retry_details = None;
         self.error = match worker.thread.join() {
             Ok(_) if stopped => None,
             Ok(Ok(())) => None,
@@ -303,6 +306,12 @@ impl TrayWindow {
             );
             AppendMenuW(
                 menu,
+                MF_STRING | disabled_if(state.worker.is_some() || state.quitting),
+                START_DIFFERENT,
+                w!("Start with Different Credentials..."),
+            );
+            AppendMenuW(
+                menu,
                 MF_STRING
                     | disabled_if(state.worker.is_none() || state.status() == Status::Stopping),
                 STOP,
@@ -310,9 +319,15 @@ impl TrayWindow {
             );
             AppendMenuW(
                 menu,
-                MF_STRING | disabled_if(state.error.is_none()),
+                MF_STRING | disabled_if(state.details().is_none()),
                 VIEW_ERROR,
-                w!("View Error"),
+                w!("View Connection Details"),
+            );
+            AppendMenuW(
+                menu,
+                MF_STRING | disabled_if(state.worker.is_some() || state.quitting),
+                FORGET_SAVED,
+                w!("Forget Saved Credentials"),
             );
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
             AppendMenuW(menu, MF_STRING, QUIT, w!("Quit ReimsBridge"));
@@ -399,11 +414,18 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 let action = window.show_menu(&state, message.wParam, message.lParam as u32);
                 state.update_worker();
                 match action {
-                    START => state.start(window.0),
+                    START => state.start(window.0, true),
+                    START_DIFFERENT => state.start(window.0, false),
+                    FORGET_SAVED => state.forget_saved(),
                     STOP => state.stop(),
                     VIEW_ERROR => {
-                        if let Some(error) = &state.error {
-                            show_error(window.0, error);
+                        if let Some(details) = state.details() {
+                            let icon = if state.error.is_some() {
+                                MB_ICONERROR
+                            } else {
+                                MB_ICONINFORMATION
+                            };
+                            show_message(window.0, details, icon);
                         }
                     }
                     QUIT => state.quit(),
@@ -437,18 +459,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn show_error(owner: HWND, error: &str) {
-    let message: Vec<u16> = error.encode_utf16().chain([0]).collect();
-    unsafe {
-        MessageBoxW(
-            owner,
-            message.as_ptr(),
-            w!("ReimsBridge"),
-            MB_OK | MB_ICONERROR,
-        )
-    };
+fn show_message(owner: HWND, text: &str, icon: u32) {
+    let message: Vec<u16> = text.encode_utf16().chain([0]).collect();
+    unsafe { MessageBoxW(owner, message.as_ptr(), w!("ReimsBridge"), MB_OK | icon) };
 }
 
 pub fn show_launch_error(error: &str) {
-    show_error(null_mut(), error);
+    show_message(null_mut(), error, MB_ICONERROR);
 }

@@ -30,6 +30,8 @@ host and a macOS guest running under Reims vGPU/QEMU.
 - 1 MiB plain-text clipboard size limit.
 - Native macOS menu bar application.
 - Windows notification-area companion and foreground synchronization command.
+- Automatic tray reconnection after temporary SSH and macOS IPC failures.
+- Optional SSH credential storage in Windows Credential Manager.
 - macOS menu bar icon for IPC state and recent watcher activity.
 - Live macOS clipboard metadata and per-session IPC transfer statistics.
 - Persistent macOS preferences for IPC startup and statistics visibility.
@@ -57,16 +59,25 @@ the `windows` directory.
 ```
 
 Start IPC in the macOS app. In the Windows notification area, open
-ReimsBridge and choose **Start Synchronization**. Enter the macOS SSH
-username and password in the Windows prompt. The tray shows when the
-watcher is connecting, synchronizing, stopping, or has encountered an
-error. Open **View Error** for connection details.
+ReimsBridge and choose **Start Synchronization**. Enter your macOS SSH
+username and password if prompted. Select the remember checkbox to save
+the login in Windows Credential Manager after successful SSH
+authentication. **Start with Different Credentials** opens a fresh
+prompt. Use **Forget Saved Credentials** while stopped to delete the
+saved login. If Credential Manager is unavailable, the Windows prompt
+still lets you start synchronization.
 
-**Stop Synchronization** finishes the current polling step and ends the
-SSH session. Starting again establishes a fresh clipboard baseline. The
-tray and the foreground watcher share a single watcher slot, including
-during `watch-test`. The tray asks for credentials each time it starts
-a watcher.
+The tray shows **Reconnecting** during temporary SSH or macOS IPC
+outages. Retry delays start at one second and increase to 15 seconds.
+Each connection verifies the SSH host key. Once IPC is ready, the watcher
+takes a fresh clipboard baseline and preserves both current copies.
+Host-key, authentication, and invalid IPC protocol failures stop the
+watcher. **View Connection Details** shows the latest failure or any
+credential storage warning.
+
+**Stop Synchronization** cancels a pending retry, finishes any current
+polling step, and ends the SSH session. The tray and the foreground
+watcher share a single watcher slot, including during `watch-test`.
 
 ### Foreground synchronization and diagnostics
 
@@ -137,8 +148,7 @@ cargo run -- receive <username>
 cargo run -- roundtrip-test <username>
 ```
 
-Passwords are requested interactively and are not embedded
-in the application or configuration files.
+The foreground commands prompt for the password interactively.
 
 ## Testing
 
@@ -225,9 +235,10 @@ marker enforcement is planned for a future release.
 Privacy markers themselves are not currently preserved
 during text transfers.
 
-The current foreground synchronization implementation
-stops on transport failures. Automatic reconnection and
-secure credential storage remain future milestones.
+The foreground synchronization command stops on transport failures.
+The tray keeps the SSH password in memory while its worker runs so it can
+authenticate again after an outage. Remembered logins are stored in
+Windows Credential Manager for the current Windows user on this machine.
 
 Only validated plain text is currently synchronized.
 Rich text, images and file transfers remain future work.
@@ -309,8 +320,8 @@ transfers without unnecessary eager copying.
 - [x] M3.5: IPC transfer statistics
 - [x] M3.6: Persistent preferences
 - [x] M3.7: Menu bar integration acceptance
-- [ ] M4: Native Windows system tray companion (interactive acceptance pending)
-- [ ] M5: Reconnection and credential management
+- [x] M4: Native Windows system tray companion
+- [ ] M5: Reconnection and credential management (interactive acceptance pending)
 - [ ] M6: Multi-format clipboard protocol
 - [ ] M7: Native image and rich-text synchronization
 - [ ] M8: Streaming file transfer protocol
