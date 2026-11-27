@@ -11,11 +11,13 @@ import Foundation
 struct ClipboardMetadata {
     let changeCount: Int
     let hasPlainText: Bool
+    let hasExtendedContent: Bool
     let isExcluded: Bool
 }
 
 enum ClipboardError: LocalizedError {
     case noText
+    case invalidBundle
     case excluded
     case oversized
     case embeddedNul
@@ -26,6 +28,8 @@ enum ClipboardError: LocalizedError {
     
     var errorDescription: String? {
         switch self {
+        case .invalidBundle:
+            return "Clipboard bundle is malformed"
         case .noText:
             return "Clipboard containes no plain text"
         case .excluded:
@@ -62,7 +66,7 @@ enum ClipboardService {
     ) -> ClipboardMetadata {
         let types = pasteboard.types ?? []
         
-        return ClipboardMetadata(changeCount: pasteboard.changeCount, hasPlainText: types.contains(.string), isExcluded: types.contains {
+        return ClipboardMetadata(changeCount: pasteboard.changeCount, hasPlainText: types.contains(.string), hasExtendedContent: ClipboardBundle.isAvailable(in: types), isExcluded: types.contains {
             excludedTypes.contains($0.rawValue)
         })
     }

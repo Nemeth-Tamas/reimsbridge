@@ -11,6 +11,8 @@ pub struct Snapshot {
     pub counters: Counters,
     pub windows_has_text: bool,
     pub mac_has_text: bool,
+    pub windows_has_bundle: bool,
+    pub mac_has_bundle: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,11 +70,13 @@ impl SyncEngine {
 
             (true, true) => Decision::Conflict,
 
-            (true, false) if snapshot.windows_has_text => {
+            (true, false) if snapshot.windows_has_text || snapshot.windows_has_bundle => {
                 Decision::Transfer(Direction::WindowsToMac)
             }
 
-            (false, true) if snapshot.mac_has_text => Decision::Transfer(Direction::MacToWindows),
+            (false, true) if snapshot.mac_has_text || snapshot.mac_has_bundle => {
+                Decision::Transfer(Direction::MacToWindows)
+            }
 
             _ => Decision::Unsupported,
         };
@@ -131,6 +135,8 @@ mod tests {
             counters: Counters { windows, mac },
             windows_has_text: true,
             mac_has_text: true,
+            windows_has_bundle: false,
+            mac_has_bundle: false,
         }
     }
 
@@ -216,6 +222,23 @@ mod tests {
         assert_eq!(engine.observe(current), Decision::Unsupported);
 
         assert_eq!(engine.observe(current), Decision::Idle);
+    }
+
+    #[test]
+    fn extended_only_clipboards_are_transfer_candidates() {
+        for (counters, direction) in [
+            ((1, 0), Direction::WindowsToMac),
+            ((0, 1), Direction::MacToWindows),
+        ] {
+            let mut engine = SyncEngine::new();
+            assert_eq!(engine.observe(snapshot(0, 0)), Decision::Baseline);
+            let mut observed = snapshot(counters.0, counters.1);
+            observed.windows_has_text = false;
+            observed.mac_has_text = false;
+            observed.windows_has_bundle = direction == Direction::WindowsToMac;
+            observed.mac_has_bundle = direction == Direction::MacToWindows;
+            assert_eq!(engine.observe(observed), Decision::Transfer(direction));
+        }
     }
 
     #[test]

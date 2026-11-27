@@ -1,5 +1,7 @@
 mod cli;
 mod clipboard;
+mod clipboard_bundle;
+mod clipboard_image;
 mod credentials;
 mod instance;
 mod mac_ipc;

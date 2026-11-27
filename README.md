@@ -20,6 +20,8 @@ host and a macOS guest running under Reims vGPU/QEMU.
 - Exact Unicode and multiline text preservation.
 - UTF-8 transport over authenticated SSH.
 - Versioned clipboard format negotiation with legacy text compatibility.
+- Native RTF and HTML with plain-text fallback when present at the source.
+- Native PNG clipboard images with Windows bitmap and macOS TIFF representations.
 - Password authentication and SSH host-key verification.
 - Clipboard metadata and native change-counter inspection.
 - Counter-aware conditional clipboard writes.
@@ -132,9 +134,21 @@ OK <format> <byte-count>\n<payload>   (read)
 OK <format> <new-counter>\n           (write)
 ```
 
-The initial UTF-8 format keeps the 1 MiB text limit. `watch-test`
-reports the framing it negotiated and verifies stale named reads and
-writes when the guest advertises them.
+The UTF-8 text format keeps the 1 MiB text limit. Updated peers
+also negotiate `clipboard-bundle-v1`. A bundle begins with four
+big-endian 32-bit byte lengths, followed by the plain UTF-8, RTF, HTML,
+and PNG representations in that order. A zero length marks an absent
+representation. Plain-only copies continue to use the text path.
+
+The in-memory bundle permits up to 1 MiB each for plain text, RTF, and
+HTML, plus up to 8 MiB for PNG at up to 16,777,216 pixels. Windows
+accepts registered PNG and common DIBs. macOS accepts PNG and converts
+TIFF when needed. Transfers preserve the PNG and publish a native
+bitmap representation on the destination.
+
+`watch-test` reports the framing it negotiated, verifies stale named
+reads and writes, and exercises rich text and a transparent PNG in
+both directions when both ends support bundles.
 
 ### macOS menu bar
 
@@ -269,8 +283,8 @@ The tray keeps the SSH password in memory while its worker runs so it can
 authenticate again after an outage. Remembered logins are stored in
 Windows Credential Manager for the current Windows user on this machine.
 
-Only validated plain text is currently synchronized.
-Rich text, images and file transfers remain future work.
+Text, rich text, and bitmap images use validated clipboard representations.
+File and folder transfers are planned for the streaming milestones.
 
 ## Production acceptance criteria
 
@@ -292,7 +306,9 @@ Production targets:
 - Compatible rich-text and HTML clipboard formats.
 - Native image and screenshot synchronization.
 - Image transparency preservation where supported.
-- Bidirectional file transfers of at least 1 GiB per file.
+- Bidirectional file transfers of at least 1 GiB per file as an acceptance floor.
+- Streaming transfers whose size is constrained by available storage and platform file limits.
+- Extensible transport for additional clipboard representations, including opaque formats.
 - Multiple-file and recursive directory transfers.
 - Bounded-memory streaming for large payloads.
 - Native Explorer and Finder copy/paste integration.
@@ -311,8 +327,10 @@ Production targets:
 - No clipboard content logging or telemetry.
 - No additional network ports or external services.
 
-Large file transfers must not require loading the entire
-file into memory.
+Large files and other large clipboard payloads require a bounded-memory
+streaming path. The current in-memory limits apply to the early text
+and bitmap transports. Native paste interoperability depends on the
+receiving platform and application's support for the representation.
 
 Native delayed rendering and file-promise mechanisms
 should be investigated to support transparent file
@@ -351,8 +369,8 @@ transfers without unnecessary eager copying.
 - [x] M3.7: Menu bar integration acceptance
 - [x] M4: Native Windows system tray companion
 - [ ] M5: Reconnection and credential management (saved credentials verified, reconnect acceptance pending)
-- [ ] M6: Multi-format clipboard protocol (native acceptance pending)
-- [ ] M7: Native image and rich-text synchronization
+- [x] M6: Multi-format clipboard protocol
+- [ ] M7: Native image and rich-text synchronization (native acceptance pending)
 - [ ] M8: Streaming file transfer protocol
 - [ ] M9: Transparent Explorer and Finder integration
 - [ ] M10: Performance, security and reliability hardening

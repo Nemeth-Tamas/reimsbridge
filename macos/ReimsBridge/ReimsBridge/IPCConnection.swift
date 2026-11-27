@@ -10,11 +10,14 @@ import Darwin
 
 private enum ClipboardFormat: String, CaseIterable {
     case utf8Text = "text-utf8"
+    case bundle = "clipboard-bundle-v1"
 
     var maxPayloadBytes: Int {
         switch self {
         case .utf8Text:
             return ClipboardService.maxClipboardBytes
+        case .bundle:
+            return ClipboardBundle.maxPayloadBytes
         }
     }
 
@@ -22,6 +25,8 @@ private enum ClipboardFormat: String, CaseIterable {
         switch self {
         case .utf8Text:
             return metadata.hasPlainText
+        case .bundle:
+            return metadata.hasExtendedContent
         }
     }
 }
@@ -41,8 +46,9 @@ final class IPCConnection {
 
     private let fd: Int32
 
-    private let deadline =
-        ProcessInfo.processInfo.systemUptime + 10.0
+    private var deadline = ProcessInfo.processInfo.systemUptime + 10.0
+    private var lastProgress = ProcessInfo.processInfo.systemUptime
+    private var usesBundleDeadline = false
 
     private var request = Data()
     private var response: Data?
@@ -50,7 +56,7 @@ final class IPCConnection {
     private(set) var isWatchStatus = false
     private(set) var transfer: Transfer?
 
-    private static let maxRequestBytes = 64
+    private static let maxRequestBytes = 96
     private static let maxPayloadBytes = ClipboardFormat.allCases.map { $0.maxPayloadBytes }.max() ?? 0
     private static let readChunkBytes = 64 * 1024
     private static let writeChunkBytes = 64 * 1024
@@ -62,8 +68,8 @@ final class IPCConnection {
     }
 
     func advance() -> Progress {
-        guard ProcessInfo.processInfo.systemUptime
-                < deadline else {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now < deadline, now - lastProgress < 10 else {
             return .failed
         }
 
@@ -159,6 +165,7 @@ final class IPCConnection {
             )
         }
 
+        lastProgress = ProcessInfo.processInfo.systemUptime
         request.append(
             contentsOf: buffer.prefix(received)
         )
@@ -220,6 +227,7 @@ final class IPCConnection {
                 return finishRequest(Data("ERR UNSUPPORTED_FORMAT\n".utf8))
             }
 
+            allowBundleDeadline(for: format)
             return finishRequest(readResponse(format: format, expectedChangeCount: counter))
         }
 
@@ -272,6 +280,7 @@ final class IPCConnection {
             )
         }
 
+        allowBundleDeadline(for: format)
         let payloadEnd = payloadStart + payloadSize
         let expectedFrameBytes = payloadEnd + 1
 
@@ -298,6 +307,14 @@ final class IPCConnection {
                 expectedChangeCount: expectedChangeCount
             )
         )
+    }
+
+    private func allowBundleDeadline(for format: ClipboardFormat?) {
+        if format == .bundle && !usesBundleDeadline {
+            // Large frames can take longer over SSH. The idle timeout still applies.
+            deadline += 170
+            usesBundleDeadline = true
+        }
     }
 
     private func parseCounter(_ value: Substring) -> Int? {
@@ -335,6 +352,12 @@ final class IPCConnection {
                     text,
                     expectedChangeCount: expectedChangeCount
                 )
+            case .bundle:
+                guard let expectedChangeCount else {
+                    return Data("ERR BAD_REQUEST\n".utf8)
+                }
+                let bundle = try ClipboardBundle.decode(payload)
+                writeCount = try bundle.write(expectedChangeCount: expectedChangeCount)
             }
 
             guard let writtenChangeCount = writeCount else {
@@ -349,6 +372,8 @@ final class IPCConnection {
             }
 
             return Data("OK\n".utf8)
+        } catch ClipboardError.invalidBundle {
+            return Data("ERR INVALID_PAYLOAD\n".utf8)
         } catch ClipboardError.noText {
             return Data("ERR NO_TEXT\n".utf8)
         } catch ClipboardError.oversized {
@@ -387,6 +412,11 @@ final class IPCConnection {
             case .utf8Text:
                 let text = try ClipboardService.readText(expectedChangeCount: expectedChangeCount)
                 payload = Data(text.utf8)
+            case .bundle:
+                guard let expectedChangeCount else {
+                    return Data("ERR BAD_REQUEST\n".utf8)
+                }
+                payload = try ClipboardBundle.read(expectedChangeCount: expectedChangeCount).encode()
             }
 
             let formatPrefix = format.map { "\($0.rawValue) " } ?? ""
@@ -454,6 +484,7 @@ final class IPCConnection {
             return .failed
         }
 
+        lastProgress = ProcessInfo.processInfo.systemUptime
         sentBytes += written
 
         if sentBytes == response.count {

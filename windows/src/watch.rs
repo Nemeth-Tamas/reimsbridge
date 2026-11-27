@@ -1,3 +1,5 @@
+use crate::clipboard_bundle::ClipboardBundle;
+use crate::clipboard_image::rgba_to_png;
 use crate::sync_engine::{
     Counters, Decision, Direction, PayloadDecision, Snapshot, SyncEngine, inspect_payload,
     still_current,
@@ -17,6 +19,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(300);
 struct WatchOptions {
     watch_status: bool,
     transport: mac_ipc::TextTransport,
+    bundles: bool,
 }
 
 fn snapshot(session: &Session, options: WatchOptions) -> Result<Option<Snapshot>, Box<dyn Error>> {
@@ -45,6 +48,8 @@ fn snapshot(session: &Session, options: WatchOptions) -> Result<Option<Snapshot>
         },
         windows_has_text: windows_after.has_plain_text,
         mac_has_text: mac.has_text_for(options.transport),
+        windows_has_bundle: options.bundles && windows_after.has_extended_content,
+        mac_has_bundle: options.bundles && mac.has_bundle(),
     }))
 }
 
@@ -65,6 +70,72 @@ fn skip_if_current(
     Ok(())
 }
 
+fn transfer_bundle(
+    session: &Session,
+    engine: &mut SyncEngine,
+    observed: Snapshot,
+    direction: Direction,
+) -> Result<bool, Box<dyn Error>> {
+    let counters = observed.counters;
+    let source = match direction {
+        Direction::WindowsToMac if observed.windows_has_bundle => {
+            clipboard::read_bundle(counters.windows)?
+        }
+        Direction::MacToWindows if observed.mac_has_bundle => {
+            mac_ipc::read_bundle(session, counters.mac)?
+        }
+        _ => return Ok(false),
+    };
+    let bundle = match source {
+        ReadOutcome::Data(bundle) => bundle,
+        ReadOutcome::Unavailable => return Ok(false),
+        ReadOutcome::Changed => return Ok(true),
+    };
+    let destination = match direction {
+        Direction::WindowsToMac if observed.mac_has_bundle => {
+            mac_ipc::read_bundle(session, counters.mac)?
+        }
+        Direction::MacToWindows if observed.windows_has_bundle => {
+            clipboard::read_bundle(counters.windows)?
+        }
+        _ => ReadOutcome::Unavailable,
+    };
+    match destination {
+        ReadOutcome::Data(current) if current == bundle => {
+            skip_if_current(session, engine, counters)?;
+            return Ok(true);
+        }
+        ReadOutcome::Changed => return Ok(true),
+        _ => {}
+    }
+    if !counters_current(session, counters)? {
+        return Ok(true);
+    }
+
+    match direction {
+        Direction::WindowsToMac => {
+            if let Some(counter) = mac_ipc::write_bundle_checked(session, &bundle, counters.mac)? {
+                engine.record_mac_write(counters, counter);
+                println!(
+                    "[WATCH] Windows -> macOS clipboard bundle: {} bytes",
+                    bundle.byte_len()
+                );
+            }
+        }
+        Direction::MacToWindows => {
+            if let Some(sequence) = clipboard::write_bundle_checked(&bundle, counters.windows)? {
+                engine.record_windows_write(counters, sequence);
+                println!(
+                    "[WATCH] macOS -> Windows clipboard bundle: {} bytes",
+                    bundle.byte_len()
+                );
+            }
+        }
+    }
+
+    Ok(true)
+}
+
 fn transfer(
     session: &Session,
     engine: &mut SyncEngine,
@@ -72,6 +143,10 @@ fn transfer(
     direction: Direction,
     transport: mac_ipc::TextTransport,
 ) -> Result<(), Box<dyn Error>> {
+    if transfer_bundle(session, engine, observed, direction)? {
+        return Ok(());
+    }
+
     let source = match direction {
         Direction::WindowsToMac => clipboard::read_for_sync()?,
 
@@ -81,7 +156,7 @@ fn transfer(
     };
 
     let source = match source {
-        ReadOutcome::Text(text) => text,
+        ReadOutcome::Data(text) => text,
 
         ReadOutcome::Unavailable => {
             println!("[WATCH] Unsupported source text; skipping");
@@ -107,7 +182,7 @@ fn transfer(
     };
 
     let destination = match destination {
-        ReadOutcome::Text(text) => Some(text),
+        ReadOutcome::Data(text) => Some(text),
 
         ReadOutcome::Unavailable => None,
 
@@ -302,8 +377,10 @@ fn expect_idle(
 
 pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
     let mut engine = SyncEngine::new();
+    let status = mac_ipc::get_status(session)?;
     let options = WatchOptions {
-        transport: mac_ipc::get_status(session)?.text_transport(),
+        transport: status.text_transport(),
+        bundles: status.supports_bundles(),
         ..WatchOptions::default()
     };
 
@@ -561,9 +638,69 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
 
     println!("[PASS] Recovery after maximum payload");
     println!("[PASS] Idle counters remain stable");
+
+    if options.bundles {
+        test_bundles(session, &mut engine, options)?;
+    }
     println!();
     println!("[PASS] ALL AUTOMATIC SYNCHRONIZATION TESTS PASSED");
 
+    Ok(())
+}
+
+fn test_bundles(
+    session: &Session,
+    engine: &mut SyncEngine,
+    options: WatchOptions,
+) -> Result<(), Box<dyn Error>> {
+    for (direction, include_rich_text) in [
+        (Direction::WindowsToMac, true),
+        (Direction::MacToWindows, true),
+        (Direction::WindowsToMac, false),
+        (Direction::MacToWindows, false),
+    ] {
+        let color = match direction {
+            Direction::WindowsToMac => [255, 0, 64, 128],
+            Direction::MacToWindows => [0, 255, 127, 64],
+        };
+        let image = image::RgbaImage::from_pixel(2, 2, image::Rgba(color));
+        let mut bundle = ClipboardBundle {
+            png: rgba_to_png(&image)?,
+            ..ClipboardBundle::default()
+        };
+        if include_rich_text {
+            bundle.text = format!("Clipboard bundle fixture {direction:?}");
+            bundle.rtf = format!("{{\\rtf1\\ansi \\b Bundle {direction:?}\\b0}}").into_bytes();
+            bundle.html = format!("<strong>Bundle {direction:?}</strong>");
+        }
+        let before = stable_counters(session)?;
+        let written = match direction {
+            Direction::WindowsToMac => {
+                clipboard::write_bundle_checked(&bundle, before.windows)?.is_some()
+            }
+            Direction::MacToWindows => {
+                mac_ipc::write_bundle_checked(session, &bundle, before.mac)?.is_some()
+            }
+        };
+        if !written {
+            return Err("Clipboard changed while preparing bundle fixture".into());
+        }
+
+        expect_step(session, engine, options, Decision::Transfer(direction))?;
+        let after = stable_counters(session)?;
+        if !matches!(clipboard::read_bundle(after.windows)?, ReadOutcome::Data(value) if value == bundle)
+            || !matches!(mac_ipc::read_bundle(session, after.mac)?, ReadOutcome::Data(value) if value == bundle)
+        {
+            return Err("Clipboard bundle changed across the native transfer".into());
+        }
+        expect_idle(session, engine, options, after, 2)?;
+        let formats = if include_rich_text {
+            "RTF, HTML, plain text, and transparent PNG bundle"
+        } else {
+            "Transparent PNG without text"
+        };
+        println!("[PASS] {formats}: {direction:?}");
+    }
     Ok(())
 }
 
@@ -593,11 +730,16 @@ pub fn run_until_stopped(
     let options = WatchOptions {
         watch_status: status.watch_status_supported,
         transport: status.text_transport(),
+        bundles: status.supports_bundles(),
     };
     println!(
         "[WATCH] Clipboard framing: {}",
         options.transport.description()
     );
+
+    if options.bundles {
+        println!("[WATCH] Native rich text and image bundles enabled");
+    }
 
     if options.watch_status {
         println!("[WATCH] macOS watcher activity reporting enabled");

@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fmt;
 use std::io::{Read, Write};
 
+use crate::clipboard_bundle::{ClipboardBundle, MAX_BUNDLE_BYTES, TOKEN as BUNDLE_TOKEN};
 use crate::sync_read::ReadOutcome;
 use crate::{clipboard, validation};
 
@@ -16,12 +17,14 @@ const FORMAT_PROTOCOL_VERSION: u32 = 1;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClipboardFormat {
     Utf8Text,
+    Bundle,
 }
 
 impl ClipboardFormat {
     fn token(self) -> &'static str {
         match self {
             Self::Utf8Text => "text-utf8",
+            Self::Bundle => BUNDLE_TOKEN,
         }
     }
 }
@@ -75,6 +78,21 @@ pub struct MacStatus {
 }
 
 impl MacStatus {
+    pub fn supports_bundles(&self) -> bool {
+        self.formats.as_ref().is_some_and(|formats| {
+            formats.version == FORMAT_PROTOCOL_VERSION
+                && formats.supported.iter().any(|token| token == BUNDLE_TOKEN)
+        })
+    }
+
+    pub fn has_bundle(&self) -> bool {
+        self.supports_bundles()
+            && self
+                .formats
+                .as_ref()
+                .is_some_and(|formats| formats.available.iter().any(|token| token == BUNDLE_TOKEN))
+    }
+
     pub fn text_transport(&self) -> TextTransport {
         let supported = self.formats.as_ref().is_some_and(|formats| {
             formats.version == FORMAT_PROTOCOL_VERSION
@@ -212,9 +230,21 @@ fn parse_read(response: Vec<u8>) -> Result<String, Box<dyn Error>> {
 }
 
 fn parse_format_read(
-    mut response: Vec<u8>,
+    response: Vec<u8>,
     format: Option<ClipboardFormat>,
 ) -> Result<String, Box<dyn Error>> {
+    validation::decode_text(parse_payload_read(
+        response,
+        format,
+        validation::MAX_CLIPBOARD_BYTES,
+    )?)
+}
+
+fn parse_payload_read(
+    mut response: Vec<u8>,
+    format: Option<ClipboardFormat>,
+    max_payload: usize,
+) -> Result<Vec<u8>, Box<dyn Error>> {
     let header_end = response
         .iter()
         .position(|&byte| byte == b'\n')
@@ -252,7 +282,7 @@ fn parse_format_read(
         .parse::<usize>()
         .map_err(|_| "Invalid IPC payload length")?;
 
-    if declared_size > validation::MAX_CLIPBOARD_BYTES {
+    if declared_size > max_payload {
         return Err("IPC payload exceeds size limit".into());
     }
 
@@ -262,9 +292,7 @@ fn parse_format_read(
         return Err("IPC payload length mismatch".into());
     }
 
-    let payload = response.split_off(header_end + 1);
-
-    validation::decode_text(payload)
+    Ok(response.split_off(header_end + 1))
 }
 
 pub fn read_text(session: &Session) -> Result<String, Box<dyn Error>> {
@@ -288,7 +316,7 @@ fn parse_sync_read(
 
         b"ERR CLIPBOARD_CHANGED\n" => Ok(ReadOutcome::Changed),
 
-        _ => parse_format_read(response, format).map(ReadOutcome::Text),
+        _ => parse_format_read(response, format).map(ReadOutcome::Data),
     }
 }
 
@@ -423,6 +451,8 @@ fn parse_format_ack(
             return Err("Native macOS clipboard write failed or was not verified".into());
         }
 
+        b"ERR INVALID_PAYLOAD\n" => return Err("macOS rejected the clipboard payload".into()),
+
         _ => {}
     }
 
@@ -474,6 +504,46 @@ pub fn write_for_sync(
     let request = build_format_write(text, expected_change_count, Some(format))?;
     let response = query(session, &request, MAX_RESPONSE_BYTES)?;
     parse_format_ack(&response, Some(format))
+}
+
+pub fn read_bundle(
+    session: &Session,
+    expected_change_count: i64,
+) -> Result<ReadOutcome<ClipboardBundle>, Box<dyn Error>> {
+    let request = format!("read-format {BUNDLE_TOKEN} {expected_change_count}\n");
+    let response = query(
+        session,
+        request.as_bytes(),
+        MAX_BUNDLE_BYTES + MAX_HEADER_BYTES,
+    )?;
+    match response.as_slice() {
+        b"ERR NO_TEXT\n" | b"ERR OVERSIZED\n" | b"ERR INVALID_PAYLOAD\n" => {
+            Ok(ReadOutcome::Unavailable)
+        }
+        b"ERR CLIPBOARD_CHANGED\n" => Ok(ReadOutcome::Changed),
+        _ => {
+            let payload =
+                parse_payload_read(response, Some(ClipboardFormat::Bundle), MAX_BUNDLE_BYTES)?;
+            ClipboardBundle::decode(&payload).map(ReadOutcome::Data)
+        }
+    }
+}
+
+pub fn write_bundle_checked(
+    session: &Session,
+    bundle: &ClipboardBundle,
+    expected_change_count: i64,
+) -> Result<Option<i64>, Box<dyn Error>> {
+    let payload = bundle.encode()?;
+    let mut request = format!(
+        "write-format-if {BUNDLE_TOKEN} {expected_change_count} {}\n",
+        payload.len()
+    )
+    .into_bytes();
+    request.extend_from_slice(&payload);
+    request.push(0);
+    let response = query(session, &request, MAX_RESPONSE_BYTES)?;
+    parse_format_ack(&response, Some(ClipboardFormat::Bundle))
 }
 
 pub fn test_checked_write(session: &Session) -> Result<(), Box<dyn Error>> {
@@ -639,9 +709,13 @@ pub fn check(session: &Session) -> Result<(), Box<dyn Error>> {
     println!("[IPC] Application status: {}", status.status);
     println!("[IPC] Clipboard change count: {}", status.change_count);
     println!("[IPC] Plain text available: {}", status.has_plain_text);
+    println!(
+        "[IPC] Rich text or image available: {}",
+        status.has_bundle()
+    );
     println!("[IPC] Content excluded: {}", status.is_excluded);
 
-    let eligible = status.has_plain_text;
+    let eligible = status.has_plain_text || status.has_bundle();
 
     println!("[IPC] Transfer candidate: {eligible}");
     println!(
@@ -757,7 +831,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            ReadOutcome::Text(text) if text == "Hello"
+            ReadOutcome::Data(text) if text == "Hello"
         ));
     }
 
@@ -1095,7 +1169,7 @@ mod tests {
 
         let read = "OK text-utf8 6\ná🦀".as_bytes().to_vec();
         assert!(
-            matches!(parse_sync_read(read, format).unwrap(), ReadOutcome::Text(text) if text == "á🦀")
+            matches!(parse_sync_read(read, format).unwrap(), ReadOutcome::Data(text) if text == "á🦀")
         );
         assert!(parse_sync_read(b"OK image-png 5\nHello".to_vec(), format).is_err());
         assert!(parse_sync_read(b"OK text-utf8 6\nHello".to_vec(), format).is_err());

@@ -1,7 +1,12 @@
+use crate::clipboard_bundle::{
+    ClipboardBundle, MAX_IMAGE_PIXELS, MAX_PNG_BYTES, canonical_png, valid_rtf,
+};
+use crate::clipboard_image::{dib_to_png, png_to_dib};
 use crate::sync_read::ReadOutcome;
-use crate::validation::validate_text;
+use crate::validation::{MAX_CLIPBOARD_BYTES, validate_text};
 use clipboard_win::{
-    Clipboard, Getter, Setter, formats, get_clipboard, is_format_avail, register_format, seq_num,
+    Clipboard, Getter, Setter, formats, get_clipboard, is_format_avail, options::NoClear, raw,
+    register_format, seq_num,
 };
 use std::error::Error;
 
@@ -15,6 +20,7 @@ const EXCLUDED_FORMATS: &[&str] = &[
 pub struct WindowsClipboardMetadata {
     pub sequence_number: u32,
     pub has_plain_text: bool,
+    pub has_extended_content: bool,
     pub is_excluded: bool,
 }
 
@@ -40,6 +46,17 @@ pub fn metadata_checked() -> Result<Option<WindowsClipboardMetadata>, Box<dyn Er
     let before = sequence_number()?;
 
     let has_plain_text = is_format_avail(formats::CF_UNICODETEXT);
+    let native_formats = ExtendedFormats::get()?;
+    let has_extended_content = !is_format_avail(formats::CF_HDROP)
+        && [
+            native_formats.rtf,
+            native_formats.html,
+            native_formats.png,
+            formats::CF_DIBV5,
+            formats::CF_DIB,
+        ]
+        .into_iter()
+        .any(is_format_avail);
     let is_excluded = has_excluded_format()?;
 
     let after = sequence_number()?;
@@ -51,6 +68,7 @@ pub fn metadata_checked() -> Result<Option<WindowsClipboardMetadata>, Box<dyn Er
     Ok(Some(WindowsClipboardMetadata {
         sequence_number: after,
         has_plain_text,
+        has_extended_content,
         is_excluded,
     }))
 }
@@ -115,7 +133,7 @@ pub fn read_for_sync() -> Result<ReadOutcome, Box<dyn Error>> {
         return Ok(ReadOutcome::Unavailable);
     }
 
-    Ok(ReadOutcome::Text(text))
+    Ok(ReadOutcome::Data(text))
 }
 
 fn verify_written_text(expected: &str) -> Result<u32, Box<dyn Error>> {
@@ -165,6 +183,157 @@ pub fn write_text_checked(
 
 pub fn write_text(text: &str) -> Result<(), Box<dyn Error>> {
     write_text_checked(text, None).map(|_| ())
+}
+
+struct ExtendedFormats {
+    rtf: u32,
+    html: u32,
+    png: u32,
+}
+
+impl ExtendedFormats {
+    fn get() -> Result<Self, Box<dyn Error>> {
+        let id = |name| {
+            register_format(name)
+                .map(|format| format.get())
+                .ok_or("Could not register extended Windows clipboard formats")
+        };
+
+        Ok(Self {
+            rtf: id("Rich Text Format")?,
+            html: id("HTML Format")?,
+            png: id("PNG")?,
+        })
+    }
+}
+
+fn bounded_raw(format: u32, limit: usize) -> Vec<u8> {
+    let mut data = Vec::new();
+    if raw::size(format).is_some_and(|length| length.get() <= limit) {
+        let _ = raw::get_vec(format, &mut data);
+    }
+    data
+}
+
+pub fn read_bundle(expected_sequence: u32) -> Result<ReadOutcome<ClipboardBundle>, Box<dyn Error>> {
+    let native_formats = ExtendedFormats::get()?;
+    let guard = Clipboard::new_attempts(10)?;
+    if sequence_number()? != expected_sequence {
+        return Ok(ReadOutcome::Changed);
+    }
+    if is_format_avail(formats::CF_HDROP) {
+        return Ok(ReadOutcome::Unavailable);
+    }
+
+    let mut text = String::new();
+    let text_size_limit = 2 * MAX_CLIPBOARD_BYTES + 2;
+    if raw::size(formats::CF_UNICODETEXT).is_some_and(|size| size.get() <= text_size_limit)
+        && (formats::Unicode.read_clipboard(&mut text).is_err() || validate_text(&text).is_err())
+    {
+        text.clear();
+    }
+
+    // Strip the Windows terminator and any allocation padding.
+    let mut rtf = bounded_raw(native_formats.rtf, MAX_CLIPBOARD_BYTES + 64);
+    rtf.truncate(
+        rtf.iter()
+            .rposition(|&byte| byte != 0)
+            .map_or(0, |last| last + 1),
+    );
+    if !valid_rtf(&rtf) {
+        rtf.clear();
+    }
+
+    let mut html_bytes = Vec::new();
+    if raw::size(native_formats.html).is_some_and(|size| size.get() <= MAX_CLIPBOARD_BYTES + 4096)
+        && raw::get_html(native_formats.html, &mut html_bytes).is_err()
+    {
+        html_bytes.clear();
+    }
+    let html = String::from_utf8(html_bytes)
+        .ok()
+        .filter(|text| validate_text(text).is_ok())
+        .unwrap_or_default();
+
+    let raw_png = bounded_raw(native_formats.png, MAX_PNG_BYTES);
+    let png = canonical_png(&raw_png).ok().map(<[u8]>::to_vec);
+    let dib = if png.is_none() {
+        let limit = (4 * MAX_IMAGE_PIXELS) as usize + 65_536;
+        let mut bitmap = bounded_raw(formats::CF_DIBV5, limit);
+        if bitmap.is_empty() {
+            bitmap = bounded_raw(formats::CF_DIB, limit);
+        }
+        bitmap
+    } else {
+        Vec::new()
+    };
+    if sequence_number()? != expected_sequence {
+        return Ok(ReadOutcome::Changed);
+    }
+    drop(guard);
+
+    let png = png.unwrap_or_else(|| {
+        if dib.is_empty() {
+            Vec::new()
+        } else {
+            dib_to_png(&dib).unwrap_or_default()
+        }
+    });
+    let bundle = ClipboardBundle {
+        text,
+        rtf,
+        html,
+        png,
+    };
+    if bundle.has_extended_content() {
+        Ok(ReadOutcome::Data(bundle))
+    } else {
+        Ok(ReadOutcome::Unavailable)
+    }
+}
+
+pub fn write_bundle_checked(
+    bundle: &ClipboardBundle,
+    expected_sequence: u32,
+) -> Result<Option<u32>, Box<dyn Error>> {
+    let native_formats = ExtendedFormats::get()?;
+    let dib = if bundle.png.is_empty() {
+        None
+    } else {
+        Some(png_to_dib(&bundle.png)?)
+    };
+    let mut rtf = bundle.rtf.clone();
+    if !rtf.is_empty() {
+        rtf.push(0);
+    }
+
+    let guard = Clipboard::new_attempts(10)?;
+    if sequence_number()? != expected_sequence {
+        return Ok(None);
+    }
+
+    raw::empty()?;
+    if !rtf.is_empty() {
+        raw::set_without_clear(native_formats.rtf, &rtf)?;
+    }
+    if !bundle.html.is_empty() {
+        raw::set_html_with(native_formats.html, &bundle.html, NoClear)?;
+    }
+    if let Some(dib) = dib {
+        raw::set_without_clear(native_formats.png, &bundle.png)?;
+        raw::set_without_clear(formats::CF_DIBV5, &dib)?;
+    }
+    if !bundle.text.is_empty() {
+        raw::set_string_with(&bundle.text, NoClear)?;
+    }
+    drop(guard);
+
+    let written_sequence = sequence_number()?;
+    if !matches!(read_bundle(written_sequence)?, ReadOutcome::Data(received) if received == *bundle)
+    {
+        return Err("Windows clipboard bundle write could not be verified".into());
+    }
+    Ok(Some(written_sequence))
 }
 
 pub fn check() -> Result<(), Box<dyn Error>> {

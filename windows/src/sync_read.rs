@@ -1,5 +1,5 @@
-pub enum ReadOutcome {
-    Text(String),
+pub enum ReadOutcome<T = String> {
+    Data(T),
     Unavailable,
     Changed,
 }
