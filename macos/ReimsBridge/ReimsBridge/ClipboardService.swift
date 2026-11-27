@@ -83,9 +83,14 @@ enum ClipboardService {
     
     static func readText(
         _ pasteboard: NSPasteboard = .general,
-        respectPrivacyMarkers: Bool = false
+        respectPrivacyMarkers: Bool = false,
+        expectedChangeCount: Int? = nil
     ) throws -> String {
         let initialCount = pasteboard.changeCount
+        if let expectedChangeCount, expectedChangeCount != initialCount {
+            throw ClipboardError.changedDuringRead
+        }
+
         let metadata = inspect(pasteboard)
         
         guard !respectPrivacyMarkers || !metadata.isExcluded else {

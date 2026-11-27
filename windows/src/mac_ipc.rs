@@ -11,6 +11,53 @@ const PROTOCOL_VERSION: u32 = 2;
 const MAX_RESPONSE_BYTES: usize = 4096;
 const MAX_HEADER_BYTES: usize = 64;
 
+const FORMAT_PROTOCOL_VERSION: u32 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClipboardFormat {
+    Utf8Text,
+}
+
+impl ClipboardFormat {
+    fn token(self) -> &'static str {
+        match self {
+            Self::Utf8Text => "text-utf8",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextTransport {
+    #[default]
+    Legacy,
+    NamedV1,
+}
+
+impl TextTransport {
+    fn format(self) -> Option<ClipboardFormat> {
+        match self {
+            Self::Legacy => None,
+            Self::NamedV1 => Some(ClipboardFormat::Utf8Text),
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy text",
+            Self::NamedV1 => "named formats v1 (text-utf8)",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct FormatStatus {
+    version: u32,
+    #[serde(default)]
+    supported: Vec<String>,
+    #[serde(default)]
+    available: Vec<String>,
+}
+
 const IPC_COMMAND: &str = r#"/usr/bin/nc -U -w 3 "$HOME/.reimsbridge/status.sock""#;
 
 #[derive(Debug, Deserialize)]
@@ -23,6 +70,38 @@ pub struct MacStatus {
     pub is_excluded: bool,
     #[serde(default)]
     pub watch_status_supported: bool,
+    #[serde(default)]
+    formats: Option<FormatStatus>,
+}
+
+impl MacStatus {
+    pub fn text_transport(&self) -> TextTransport {
+        let supported = self.formats.as_ref().is_some_and(|formats| {
+            formats.version == FORMAT_PROTOCOL_VERSION
+                && formats
+                    .supported
+                    .iter()
+                    .any(|token| token == ClipboardFormat::Utf8Text.token())
+        });
+        if supported {
+            TextTransport::NamedV1
+        } else {
+            TextTransport::Legacy
+        }
+    }
+
+    pub fn has_text_for(&self, transport: TextTransport) -> bool {
+        match transport.format() {
+            Some(format) => self.formats.as_ref().is_some_and(|formats| {
+                formats.version == FORMAT_PROTOCOL_VERSION
+                    && formats
+                        .available
+                        .iter()
+                        .any(|token| token == format.token())
+            }),
+            None => self.has_plain_text,
+        }
+    }
 }
 
 fn parse_status(response: &[u8]) -> Result<MacStatus, Box<dyn Error>> {
@@ -118,7 +197,24 @@ pub fn get_watch_status(session: &Session) -> Result<MacStatus, Box<dyn Error>> 
     parse_status(&response)
 }
 
-fn parse_read(mut response: Vec<u8>) -> Result<String, Box<dyn Error>> {
+fn format_value(value: &[u8], format: Option<ClipboardFormat>) -> Result<&[u8], Box<dyn Error>> {
+    match format {
+        None => Ok(value),
+        Some(format) => value
+            .strip_prefix(format.token().as_bytes())
+            .and_then(|value| value.strip_prefix(b" "))
+            .ok_or_else(|| "IPC response format mismatch".into()),
+    }
+}
+
+fn parse_read(response: Vec<u8>) -> Result<String, Box<dyn Error>> {
+    parse_format_read(response, None)
+}
+
+fn parse_format_read(
+    mut response: Vec<u8>,
+    format: Option<ClipboardFormat>,
+) -> Result<String, Box<dyn Error>> {
     let header_end = response
         .iter()
         .position(|&byte| byte == b'\n')
@@ -149,9 +245,10 @@ fn parse_read(mut response: Vec<u8>) -> Result<String, Box<dyn Error>> {
         return Err(message.into());
     }
 
-    let declared_size = header
+    let value = header
         .strip_prefix("OK ")
-        .ok_or("Invalid IPC response status")?
+        .ok_or("Invalid IPC response status")?;
+    let declared_size = std::str::from_utf8(format_value(value.as_bytes(), format)?)?
         .parse::<usize>()
         .map_err(|_| "Invalid IPC payload length")?;
 
@@ -180,7 +277,10 @@ pub fn read_text(session: &Session) -> Result<String, Box<dyn Error>> {
     parse_read(response)
 }
 
-fn parse_sync_read(response: Vec<u8>) -> Result<ReadOutcome, Box<dyn Error>> {
+fn parse_sync_read(
+    response: Vec<u8>,
+    format: Option<ClipboardFormat>,
+) -> Result<ReadOutcome, Box<dyn Error>> {
     match response.as_slice() {
         b"ERR NO_TEXT\n" | b"ERR OVERSIZED\n" | b"ERR INVALID_TEXT\n" => {
             Ok(ReadOutcome::Unavailable)
@@ -188,18 +288,27 @@ fn parse_sync_read(response: Vec<u8>) -> Result<ReadOutcome, Box<dyn Error>> {
 
         b"ERR CLIPBOARD_CHANGED\n" => Ok(ReadOutcome::Changed),
 
-        _ => parse_read(response).map(ReadOutcome::Text),
+        _ => parse_format_read(response, format).map(ReadOutcome::Text),
     }
 }
 
-pub fn read_for_sync(session: &Session) -> Result<ReadOutcome, Box<dyn Error>> {
+pub fn read_for_sync(
+    session: &Session,
+    transport: TextTransport,
+    expected_change_count: i64,
+) -> Result<ReadOutcome, Box<dyn Error>> {
+    let format = transport.format();
+    let request = match format {
+        Some(format) => format!("read-format {} {expected_change_count}\n", format.token()),
+        None => "read\n".to_owned(),
+    };
     let response = query(
         session,
-        b"read\n",
+        request.as_bytes(),
         validation::MAX_CLIPBOARD_BYTES + MAX_HEADER_BYTES,
     )?;
 
-    parse_sync_read(response)
+    parse_sync_read(response, format)
 }
 
 pub fn receive(session: &Session) -> Result<(), Box<dyn Error>> {
@@ -257,9 +366,25 @@ fn build_checked_write_request(
     text: &str,
     expected_change_count: i64,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
+    build_format_write(text, expected_change_count, None)
+}
+
+fn build_format_write(
+    text: &str,
+    expected_change_count: i64,
+    format: Option<ClipboardFormat>,
+) -> Result<Vec<u8>, Box<dyn Error>> {
     validation::validate_text(text)?;
 
-    let mut request = format!("write-if {expected_change_count} {}\n", text.len()).into_bytes();
+    let header = match format {
+        Some(format) => format!(
+            "write-format-if {} {expected_change_count} {}\n",
+            format.token(),
+            text.len()
+        ),
+        None => format!("write-if {expected_change_count} {}\n", text.len()),
+    };
+    let mut request = header.into_bytes();
 
     request.extend_from_slice(text.as_bytes());
     request.push(0);
@@ -268,6 +393,13 @@ fn build_checked_write_request(
 }
 
 fn parse_checked_write_response(response: &[u8]) -> Result<Option<i64>, Box<dyn Error>> {
+    parse_format_ack(response, None)
+}
+
+fn parse_format_ack(
+    response: &[u8],
+    format: Option<ClipboardFormat>,
+) -> Result<Option<i64>, Box<dyn Error>> {
     match response {
         b"ERR STALE\n" => return Ok(None),
 
@@ -303,6 +435,7 @@ fn parse_checked_write_response(response: &[u8]) -> Result<Option<i64>, Box<dyn 
         .and_then(|value| value.strip_suffix(b"\n"))
         .ok_or("Invalid conditional IPC write acknowledgement")?;
 
+    let counter_bytes = format_value(counter_bytes, format)?;
     let digits = counter_bytes.strip_prefix(b"-").unwrap_or(counter_bytes);
 
     if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
@@ -326,6 +459,21 @@ pub fn write_text_checked(
     let response = query(session, &request, MAX_RESPONSE_BYTES)?;
 
     parse_checked_write_response(&response)
+}
+
+pub fn write_for_sync(
+    session: &Session,
+    transport: TextTransport,
+    text: &str,
+    expected_change_count: i64,
+) -> Result<Option<i64>, Box<dyn Error>> {
+    let Some(format) = transport.format() else {
+        return write_text_checked(session, text, expected_change_count);
+    };
+
+    let request = build_format_write(text, expected_change_count, Some(format))?;
+    let response = query(session, &request, MAX_RESPONSE_BYTES)?;
+    parse_format_ack(&response, Some(format))
 }
 
 pub fn test_checked_write(session: &Session) -> Result<(), Box<dyn Error>> {
@@ -496,6 +644,10 @@ pub fn check(session: &Session) -> Result<(), Box<dyn Error>> {
     let eligible = status.has_plain_text;
 
     println!("[IPC] Transfer candidate: {eligible}");
+    println!(
+        "[IPC] Clipboard framing: {}",
+        status.text_transport().description()
+    );
     println!("[IPC] Native macOS communication: PASS");
 
     Ok(())
@@ -601,7 +753,7 @@ mod tests {
     fn sync_read_valid_text() {
         let response = b"OK 5\nHello".to_vec();
 
-        let result = parse_sync_read(response).unwrap();
+        let result = parse_sync_read(response, None).unwrap();
 
         assert!(matches!(
             result,
@@ -617,7 +769,7 @@ mod tests {
             b"ERR INVALID_TEXT\n",
         ] {
             assert!(matches!(
-                parse_sync_read(response.to_vec()).unwrap(),
+                parse_sync_read(response.to_vec(), None).unwrap(),
                 ReadOutcome::Unavailable
             ));
         }
@@ -626,7 +778,7 @@ mod tests {
     #[test]
     fn sync_read_changed() {
         assert!(matches!(
-            parse_sync_read(b"ERR CLIPBOARD_CHANGED\n".to_vec()).unwrap(),
+            parse_sync_read(b"ERR CLIPBOARD_CHANGED\n".to_vec(), None).unwrap(),
             ReadOutcome::Changed
         ));
     }
@@ -641,7 +793,7 @@ mod tests {
             b"OK 10\nHello",
             b"",
         ] {
-            assert!(parse_sync_read(response.to_vec()).is_err());
+            assert!(parse_sync_read(response.to_vec(), None).is_err());
         }
     }
 
@@ -896,5 +1048,72 @@ mod tests {
         for response in [b"".as_slice(), b"OK", b"OK\nextra", b"UNKNOWN\n"] {
             assert!(parse_write_response(response).is_err());
         }
+    }
+    #[test]
+    fn negotiates_named_text_and_falls_back_for_legacy_or_unknown_versions() {
+        for (formats, transport, available) in [
+            ("", TextTransport::Legacy, true),
+            (
+                r#","formats":{"version":2,"supported":["text-utf8"],"available":[]}"#,
+                TextTransport::Legacy,
+                true,
+            ),
+            (
+                r#","formats":{"version":1,"supported":["image-png"],"available":[]}"#,
+                TextTransport::Legacy,
+                true,
+            ),
+            (
+                r#","formats":{"version":1,"supported":["text-utf8"],"available":[]}"#,
+                TextTransport::NamedV1,
+                false,
+            ),
+            (
+                r#","formats":{"version":1,"supported":["text-utf8","image-png"],"available":["text-utf8"]}"#,
+                TextTransport::NamedV1,
+                true,
+            ),
+        ] {
+            let response = format!(
+                r#"{{"protocol":2,"status":"ok","changeCount":-42,"hasPlainText":true,"isExcluded":false{formats}}}"#
+            );
+            let status = parse_status(response.as_bytes()).unwrap();
+            assert_eq!(status.text_transport(), transport);
+            assert_eq!(status.has_text_for(transport), available);
+        }
+    }
+
+    #[test]
+    fn named_text_frames_require_matching_format_and_utf8_byte_length() {
+        let format = Some(ClipboardFormat::Utf8Text);
+        let frame = build_format_write("á🦀", i64::MIN, format).unwrap();
+        assert_eq!(
+            frame,
+            "write-format-if text-utf8 -9223372036854775808 6\ná🦀\0".as_bytes()
+        );
+        assert!(frame.iter().position(|&byte| byte == b'\n').unwrap() < MAX_HEADER_BYTES);
+
+        let read = "OK text-utf8 6\ná🦀".as_bytes().to_vec();
+        assert!(
+            matches!(parse_sync_read(read, format).unwrap(), ReadOutcome::Text(text) if text == "á🦀")
+        );
+        assert!(parse_sync_read(b"OK image-png 5\nHello".to_vec(), format).is_err());
+        assert!(parse_sync_read(b"OK text-utf8 6\nHello".to_vec(), format).is_err());
+        assert!(matches!(
+            parse_sync_read(b"ERR CLIPBOARD_CHANGED\n".to_vec(), format).unwrap(),
+            ReadOutcome::Changed
+        ));
+    }
+
+    #[test]
+    fn named_write_acknowledgements_bind_to_the_requested_format() {
+        let format = Some(ClipboardFormat::Utf8Text);
+        assert_eq!(
+            parse_format_ack(b"OK text-utf8 -42\n", format).unwrap(),
+            Some(-42)
+        );
+        assert_eq!(parse_format_ack(b"ERR STALE\n", format).unwrap(), None);
+        assert!(parse_format_ack(b"OK 42\n", format).is_err());
+        assert!(parse_format_ack(b"OK image-png 42\n", format).is_err());
     }
 }

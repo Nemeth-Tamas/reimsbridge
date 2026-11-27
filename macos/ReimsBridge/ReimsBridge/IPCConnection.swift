@@ -8,6 +8,24 @@
 import Foundation
 import Darwin
 
+private enum ClipboardFormat: String, CaseIterable {
+    case utf8Text = "text-utf8"
+
+    var maxPayloadBytes: Int {
+        switch self {
+        case .utf8Text:
+            return ClipboardService.maxClipboardBytes
+        }
+    }
+
+    func isAvailable(in metadata: ClipboardMetadata) -> Bool {
+        switch self {
+        case .utf8Text:
+            return metadata.hasPlainText
+        }
+    }
+}
+
 @MainActor
 final class IPCConnection {
     enum Progress {
@@ -33,6 +51,7 @@ final class IPCConnection {
     private(set) var transfer: Transfer?
 
     private static let maxRequestBytes = 64
+    private static let maxPayloadBytes = ClipboardFormat.allCases.map { $0.maxPayloadBytes }.max() ?? 0
     private static let readChunkBytes = 64 * 1024
     private static let writeChunkBytes = 64 * 1024
     private static let maxReadsPerTick = 4
@@ -130,7 +149,7 @@ final class IPCConnection {
         }
 
         let maxFrameBytes =
-            ClipboardService.maxClipboardBytes
+            Self.maxPayloadBytes
             + Self.maxRequestBytes
             + 1
 
@@ -189,38 +208,45 @@ final class IPCConnection {
             omittingEmptySubsequences: false
         )
 
+        if fields.first == "read-format" {
+            guard fields.count == 3,
+                  request.count == payloadStart,
+                  let counter = parseCounter(fields[2])
+            else {
+                return finishRequest(Data("ERR BAD_REQUEST\n".utf8))
+            }
+
+            guard let format = ClipboardFormat(rawValue: String(fields[1])) else {
+                return finishRequest(Data("ERR UNSUPPORTED_FORMAT\n".utf8))
+            }
+
+            return finishRequest(readResponse(format: format, expectedChangeCount: counter))
+        }
+
+        let format: ClipboardFormat?
         let expectedChangeCount: Int?
         let sizeString: Substring
 
-        if fields.count == 2,
-           fields[0] == "write" {
+        if fields.count == 2, fields[0] == "write" {
+            format = nil
             expectedChangeCount = nil
             sizeString = fields[1]
-        } else if fields.count == 3,
-                  fields[0] == "write-if" {
-            let counterString = fields[1]
-
-            let digits = counterString.first == "-"
-                ? counterString.dropFirst()
-                : counterString
-
-            guard !digits.isEmpty,
-                  digits.utf8.allSatisfy({
-                      (48...57).contains($0)
-                  }),
-                  let counter = Int(counterString)
-            else {
-                return finishRequest(
-                    Data("ERR BAD_REQUEST\n".utf8)
-                )
-            }
-
+        } else if fields.count == 3, fields[0] == "write-if",
+                  let counter = parseCounter(fields[1]) {
+            format = nil
             expectedChangeCount = counter
             sizeString = fields[2]
+        } else if fields.count == 4, fields[0] == "write-format-if",
+                  let counter = parseCounter(fields[2]) {
+            guard let requestedFormat = ClipboardFormat(rawValue: String(fields[1])) else {
+                return finishRequest(Data("ERR UNSUPPORTED_FORMAT\n".utf8))
+            }
+
+            format = requestedFormat
+            expectedChangeCount = counter
+            sizeString = fields[3]
         } else {
-            return finishRequest(
-                Data("ERR BAD_REQUEST\n".utf8)
-            )
+            return finishRequest(Data("ERR BAD_REQUEST\n".utf8))
         }
 
         guard !sizeString.isEmpty,
@@ -240,7 +266,7 @@ final class IPCConnection {
             )
         }
 
-        guard payloadSize <= ClipboardService.maxClipboardBytes else {
+        guard payloadSize <= (format ?? .utf8Text).maxPayloadBytes else {
             return finishRequest(
                 Data("ERR OVERSIZED\n".utf8)
             )
@@ -268,9 +294,19 @@ final class IPCConnection {
         return finishRequest(
             writeResponse(
                 payload,
+                format: format,
                 expectedChangeCount: expectedChangeCount
             )
         )
+    }
+
+    private func parseCounter(_ value: Substring) -> Int? {
+        let digits = value.first == "-" ? value.dropFirst() : value
+        guard !digits.isEmpty, digits.utf8.allSatisfy({ (48...57).contains($0) }) else {
+            return nil
+        }
+
+        return Int(value)
     }
 
     private func finishRequest(
@@ -284,33 +320,32 @@ final class IPCConnection {
 
     private func writeResponse(
         _ payload: Data,
+        format: ClipboardFormat?,
         expectedChangeCount: Int?
     ) -> Data {
-        let text = String(
-            decoding: payload,
-            as: UTF8.self
-        )
-
-        guard text.utf8.elementsEqual(payload) else {
-            return Data("ERR INVALID_TEXT\n".utf8)
-        }
-
         do {
-            guard let writtenChangeCount =
-                try ClipboardService.writeTextChecked(
+            let writeCount: Int?
+            switch format ?? .utf8Text {
+            case .utf8Text:
+                let text = String(decoding: payload, as: UTF8.self)
+                guard text.utf8.elementsEqual(payload) else {
+                    return Data("ERR INVALID_TEXT\n".utf8)
+                }
+                writeCount = try ClipboardService.writeTextChecked(
                     text,
                     expectedChangeCount: expectedChangeCount
                 )
-            else {
+            }
+
+            guard let writtenChangeCount = writeCount else {
                 return Data("ERR STALE\n".utf8)
             }
 
             transfer = .received(bytes: payload.count)
 
             if expectedChangeCount != nil {
-                return Data(
-                    "OK \(writtenChangeCount)\n".utf8
-                )
+                let formatPrefix = format.map { "\($0.rawValue) " } ?? ""
+                return Data("OK \(formatPrefix)\(writtenChangeCount)\n".utf8)
             }
 
             return Data("OK\n".utf8)
@@ -327,24 +362,35 @@ final class IPCConnection {
 
     private func statusResponse() -> Data {
         let metadata = ClipboardService.inspect()
+        let supported = ClipboardFormat.allCases
+        let available = supported.filter { $0.isAvailable(in: metadata) }
 
         let json =
             """
-            {"protocol":2,"status":"ok","watchStatusSupported":true,"changeCount":\(metadata.changeCount),"hasPlainText":\(metadata.hasPlainText),"isExcluded":\(metadata.isExcluded)}
+            {"protocol":2,"status":"ok","watchStatusSupported":true,"changeCount":\(metadata.changeCount),"hasPlainText":\(metadata.hasPlainText),"isExcluded":\(metadata.isExcluded),"formats":{"version":1,"supported":[\(formatList(supported))],"available":[\(formatList(available))]}}
             """ + "\n"
 
         return Data(json.utf8)
     }
 
-    private func readResponse() -> Data {
+    private func formatList(_ formats: [ClipboardFormat]) -> String {
+        formats.map { "\"\($0.rawValue)\"" }.joined(separator: ",")
+    }
+
+    private func readResponse(
+        format: ClipboardFormat? = nil,
+        expectedChangeCount: Int? = nil
+    ) -> Data {
         do {
-            let text = try ClipboardService.readText()
+            let payload: Data
+            switch format ?? .utf8Text {
+            case .utf8Text:
+                let text = try ClipboardService.readText(expectedChangeCount: expectedChangeCount)
+                payload = Data(text.utf8)
+            }
 
-            let payload = Data(text.utf8)
-
-            var result = Data(
-                "OK \(payload.count)\n".utf8
-            )
+            let formatPrefix = format.map { "\($0.rawValue) " } ?? ""
+            var result = Data("OK \(formatPrefix)\(payload.count)\n".utf8)
 
             result.append(payload)
             transfer = .sent(bytes: payload.count)

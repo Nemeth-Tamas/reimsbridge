@@ -13,12 +13,18 @@ use std::time::Duration;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 
-fn snapshot(session: &Session, watch_status: bool) -> Result<Option<Snapshot>, Box<dyn Error>> {
+#[derive(Clone, Copy, Default)]
+struct WatchOptions {
+    watch_status: bool,
+    transport: mac_ipc::TextTransport,
+}
+
+fn snapshot(session: &Session, options: WatchOptions) -> Result<Option<Snapshot>, Box<dyn Error>> {
     let Some(windows_before) = clipboard::metadata_checked()? else {
         return Ok(None);
     };
 
-    let mac = if watch_status {
+    let mac = if options.watch_status {
         mac_ipc::get_watch_status(session)?
     } else {
         mac_ipc::get_status(session)?
@@ -38,12 +44,13 @@ fn snapshot(session: &Session, watch_status: bool) -> Result<Option<Snapshot>, B
             mac: mac.change_count,
         },
         windows_has_text: windows_after.has_plain_text,
-        mac_has_text: mac.has_plain_text,
+        mac_has_text: mac.has_text_for(options.transport),
     }))
 }
 
 fn counters_current(session: &Session, expected: Counters) -> Result<bool, Box<dyn Error>> {
-    Ok(snapshot(session, false)?.is_some_and(|actual| still_current(expected, actual.counters)))
+    Ok(snapshot(session, WatchOptions::default())?
+        .is_some_and(|actual| still_current(expected, actual.counters)))
 }
 
 fn skip_if_current(
@@ -63,11 +70,14 @@ fn transfer(
     engine: &mut SyncEngine,
     observed: Snapshot,
     direction: Direction,
+    transport: mac_ipc::TextTransport,
 ) -> Result<(), Box<dyn Error>> {
     let source = match direction {
         Direction::WindowsToMac => clipboard::read_for_sync()?,
 
-        Direction::MacToWindows => mac_ipc::read_for_sync(session)?,
+        Direction::MacToWindows => {
+            mac_ipc::read_for_sync(session, transport, observed.counters.mac)?
+        }
     };
 
     let source = match source {
@@ -87,7 +97,9 @@ fn transfer(
     };
 
     let destination = match direction {
-        Direction::WindowsToMac if observed.mac_has_text => mac_ipc::read_for_sync(session)?,
+        Direction::WindowsToMac if observed.mac_has_text => {
+            mac_ipc::read_for_sync(session, transport, observed.counters.mac)?
+        }
 
         Direction::MacToWindows if observed.windows_has_text => clipboard::read_for_sync()?,
 
@@ -136,7 +148,8 @@ fn transfer(
 
     match direction {
         Direction::WindowsToMac => {
-            let written = mac_ipc::write_text_checked(session, &source, observed.counters.mac)?;
+            let written =
+                mac_ipc::write_for_sync(session, transport, &source, observed.counters.mac)?;
 
             match written {
                 Some(counter) => {
@@ -174,9 +187,9 @@ fn transfer(
 fn poll_once(
     session: &Session,
     engine: &mut SyncEngine,
-    watch_status: bool,
+    options: WatchOptions,
 ) -> Result<Option<Decision>, Box<dyn Error>> {
-    let Some(observed) = snapshot(session, watch_status)? else {
+    let Some(observed) = snapshot(session, options)? else {
         return Ok(None);
     };
 
@@ -203,7 +216,7 @@ fn poll_once(
         }
 
         Decision::Transfer(direction) => {
-            transfer(session, engine, observed, direction)?;
+            transfer(session, engine, observed, direction, options.transport)?;
         }
     }
 
@@ -212,7 +225,7 @@ fn poll_once(
 
 fn stable_counters(session: &Session) -> Result<Counters, Box<dyn Error>> {
     for _ in 0..10 {
-        if let Some(observed) = snapshot(session, false)? {
+        if let Some(observed) = snapshot(session, WatchOptions::default())? {
             return Ok(observed.counters);
         }
 
@@ -252,9 +265,10 @@ fn verify_pair(
 fn expect_step(
     session: &Session,
     engine: &mut SyncEngine,
+    options: WatchOptions,
     expected: Decision,
 ) -> Result<(), Box<dyn Error>> {
-    let actual = poll_once(session, engine, false)?;
+    let actual = poll_once(session, engine, options)?;
 
     if actual != Some(expected) {
         return Err(format!(
@@ -269,13 +283,14 @@ fn expect_step(
 fn expect_idle(
     session: &Session,
     engine: &mut SyncEngine,
+    options: WatchOptions,
     expected: Counters,
     iterations: usize,
 ) -> Result<(), Box<dyn Error>> {
     for _ in 0..iterations {
         thread::sleep(POLL_INTERVAL);
 
-        expect_step(session, engine, Decision::Idle)?;
+        expect_step(session, engine, options, Decision::Idle)?;
 
         if stable_counters(session)? != expected {
             return Err("Clipboard counters changed while idle".into());
@@ -287,8 +302,16 @@ fn expect_idle(
 
 pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
     let mut engine = SyncEngine::new();
+    let options = WatchOptions {
+        transport: mac_ipc::get_status(session)?.text_transport(),
+        ..WatchOptions::default()
+    };
 
     println!("[ACCEPTANCE] M2.3D automatic synchronization");
+    println!(
+        "[ACCEPTANCE] Clipboard framing: {}",
+        options.transport.description()
+    );
     println!("[ACCEPTANCE] Both clipboards will be modified");
 
     let windows_initial = "Independent Windows startup clipboard";
@@ -299,14 +322,33 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
     mac_ipc::write_text(session, mac_initial)?;
 
     let initial = verify_pair(session, windows_initial, mac_initial)?;
+    if options.transport == mac_ipc::TextTransport::NamedV1 {
+        let stale_count = initial.mac.wrapping_add(1);
+        let stale_read = mac_ipc::read_for_sync(session, options.transport, stale_count)?;
+        let stale_write = mac_ipc::write_for_sync(
+            session,
+            options.transport,
+            "Stale format write fixture",
+            stale_count,
+        )?;
 
-    expect_step(session, &mut engine, Decision::Baseline)?;
+        if !matches!(stale_read, ReadOutcome::Changed)
+            || stale_write.is_some()
+            || verify_pair(session, windows_initial, mac_initial)? != initial
+        {
+            return Err("Named format counter guards did not preserve the clipboards".into());
+        }
+
+        println!("[PASS] Named format stale read and write were rejected");
+    }
+
+    expect_step(session, &mut engine, options, Decision::Baseline)?;
 
     if verify_pair(session, windows_initial, mac_initial)? != initial {
         return Err("Baseline modified a clipboard".into());
     }
 
-    expect_idle(session, &mut engine, initial, 3)?;
+    expect_idle(session, &mut engine, options, initial, 3)?;
 
     println!("[PASS] Startup baseline preservation");
 
@@ -323,12 +365,13 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
     expect_step(
         session,
         &mut engine,
+        options,
         Decision::Transfer(Direction::WindowsToMac),
     )?;
 
     let windows_synced = verify_pair(session, windows_fixture, windows_fixture)?;
 
-    expect_idle(session, &mut engine, windows_synced, 3)?;
+    expect_idle(session, &mut engine, options, windows_synced, 3)?;
 
     println!("[PASS] Automatic Windows -> macOS");
     println!("[PASS] Exact Unicode and formatting");
@@ -347,12 +390,13 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
     expect_step(
         session,
         &mut engine,
+        options,
         Decision::Transfer(Direction::MacToWindows),
     )?;
 
     let mac_synced = verify_pair(session, mac_fixture, mac_fixture)?;
 
-    expect_idle(session, &mut engine, mac_synced, 3)?;
+    expect_idle(session, &mut engine, options, mac_synced, 3)?;
 
     println!("[PASS] Automatic macOS -> Windows");
     println!("[PASS] macOS -> Windows feedback suppression");
@@ -368,6 +412,7 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
     expect_step(
         session,
         &mut engine,
+        options,
         Decision::Transfer(Direction::WindowsToMac),
     )?;
 
@@ -377,7 +422,7 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
         return Err("Identical Windows copy modified destination".into());
     }
 
-    expect_idle(session, &mut engine, identical_result, 2)?;
+    expect_idle(session, &mut engine, options, identical_result, 2)?;
 
     mac_ipc::write_text(session, mac_fixture)?;
 
@@ -390,6 +435,7 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
     expect_step(
         session,
         &mut engine,
+        options,
         Decision::Transfer(Direction::MacToWindows),
     )?;
 
@@ -399,7 +445,7 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
         return Err("Identical macOS copy modified destination".into());
     }
 
-    expect_idle(session, &mut engine, identical_reverse, 2)?;
+    expect_idle(session, &mut engine, options, identical_reverse, 2)?;
 
     println!("[PASS] Bidirectional identical payload suppression");
 
@@ -412,13 +458,13 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
 
     let conflicting = verify_pair(session, windows_conflict, mac_conflict)?;
 
-    expect_step(session, &mut engine, Decision::Conflict)?;
+    expect_step(session, &mut engine, options, Decision::Conflict)?;
 
     if verify_pair(session, windows_conflict, mac_conflict)? != conflicting {
         return Err("Conflict handling modified a clipboard".into());
     }
 
-    expect_idle(session, &mut engine, conflicting, 3)?;
+    expect_idle(session, &mut engine, options, conflicting, 3)?;
 
     println!("[PASS] Simultaneous clipboard changes");
     println!("[PASS] Both conflicting copies preserved");
@@ -430,12 +476,13 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
     expect_step(
         session,
         &mut engine,
+        options,
         Decision::Transfer(Direction::WindowsToMac),
     )?;
 
     let recovered = verify_pair(session, recovery, recovery)?;
 
-    expect_idle(session, &mut engine, recovered, 2)?;
+    expect_idle(session, &mut engine, options, recovered, 2)?;
 
     println!("[PASS] Automatic synchronization after conflict");
 
@@ -453,6 +500,7 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
     expect_step(
         session,
         &mut engine,
+        options,
         Decision::Transfer(Direction::WindowsToMac),
     )?;
 
@@ -463,7 +511,7 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
 
     let large_windows_synced = verify_pair(session, &large_windows, &large_windows)?;
 
-    expect_idle(session, &mut engine, large_windows_synced, 3)?;
+    expect_idle(session, &mut engine, options, large_windows_synced, 3)?;
 
     println!("[PASS] Automatic 1 MiB Windows -> macOS");
 
@@ -481,6 +529,7 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
     expect_step(
         session,
         &mut engine,
+        options,
         Decision::Transfer(Direction::MacToWindows),
     )?;
 
@@ -491,7 +540,7 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
 
     let large_mac_synced = verify_pair(session, &large_mac, &large_mac)?;
 
-    expect_idle(session, &mut engine, large_mac_synced, 3)?;
+    expect_idle(session, &mut engine, options, large_mac_synced, 3)?;
 
     println!("[PASS] Automatic 1 MiB macOS -> Windows");
 
@@ -502,12 +551,13 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
     expect_step(
         session,
         &mut engine,
+        options,
         Decision::Transfer(Direction::MacToWindows),
     )?;
 
     let final_counters = verify_pair(session, final_fixture, final_fixture)?;
 
-    expect_idle(session, &mut engine, final_counters, 10)?;
+    expect_idle(session, &mut engine, options, final_counters, 10)?;
 
     println!("[PASS] Recovery after maximum payload");
     println!("[PASS] Idle counters remain stable");
@@ -539,13 +589,22 @@ pub fn run_until_stopped(
         return Ok(());
     }
 
-    let watch_status = mac_ipc::get_status(session)?.watch_status_supported;
-    if watch_status {
+    let status = mac_ipc::get_status(session)?;
+    let options = WatchOptions {
+        watch_status: status.watch_status_supported,
+        transport: status.text_transport(),
+    };
+    println!(
+        "[WATCH] Clipboard framing: {}",
+        options.transport.description()
+    );
+
+    if options.watch_status {
         println!("[WATCH] macOS watcher activity reporting enabled");
     }
 
     while !stop.load(Ordering::Relaxed) {
-        if poll_once(session, &mut engine, watch_status)? == Some(Decision::Baseline) {
+        if poll_once(session, &mut engine, options)? == Some(Decision::Baseline) {
             on_active();
         }
 

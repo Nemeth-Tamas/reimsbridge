@@ -19,6 +19,7 @@ host and a macOS guest running under Reims vGPU/QEMU.
 - Ordinary keyboard shortcuts and application Copy/Paste menus.
 - Exact Unicode and multiline text preservation.
 - UTF-8 transport over authenticated SSH.
+- Versioned clipboard format negotiation with legacy text compatibility.
 - Password authentication and SSH host-key verification.
 - Clipboard metadata and native change-counter inspection.
 - Counter-aware conditional clipboard writes.
@@ -108,6 +109,34 @@ Ordinary diagnostic requests do not activate the indicator.
 The indicator is a liveness hint, not proof of a successful
 transfer or a persistent connection. Older companions remain
 compatible with the original protocol 2 status request.
+
+### Clipboard format negotiation
+
+The Mac status response includes an optional `formats` object with
+`version`, `supported`, and `available` fields. `supported` lists
+the formats the IPC service understands. `available` lists formats
+advertised by the current Mac pasteboard. Format protocol v1 currently
+registers `text-utf8`. The watcher uses legacy text commands if its
+peer has no compatible format capability. Manual protocol 2 text
+commands remain available.
+
+A named read includes the observed pasteboard counter. A named write
+includes the expected destination counter and the length in bytes.
+Successful responses echo the format. Writes include one trailing
+NUL byte after the declared payload.
+
+```text
+read-format <format> <expected-counter>\n
+write-format-if <format> <expected-counter> <byte-count>\n<payload>\0
+OK <format> <byte-count>\n<payload>   (read)
+OK <format> <new-counter>\n           (write)
+```
+
+The initial UTF-8 format keeps the 1 MiB text limit. `watch-test`
+reports the framing it negotiated and verifies stale named reads and
+writes when the guest advertises them.
+
+### macOS menu bar
 
 The macOS menu shows the current IPC state and recent Windows watcher
 activity. Clipboard metadata updates automatically, including while IPC is
@@ -321,8 +350,8 @@ transfers without unnecessary eager copying.
 - [x] M3.6: Persistent preferences
 - [x] M3.7: Menu bar integration acceptance
 - [x] M4: Native Windows system tray companion
-- [ ] M5: Reconnection and credential management (interactive acceptance pending)
-- [ ] M6: Multi-format clipboard protocol
+- [ ] M5: Reconnection and credential management (saved credentials verified, reconnect acceptance pending)
+- [ ] M6: Multi-format clipboard protocol (native acceptance pending)
 - [ ] M7: Native image and rich-text synchronization
 - [ ] M8: Streaming file transfer protocol
 - [ ] M9: Transparent Explorer and Finder integration
