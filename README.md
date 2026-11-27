@@ -42,28 +42,65 @@ host and a macOS guest running under Reims vGPU/QEMU.
 - Persistent macOS preferences for IPC startup and statistics visibility.
 - No application-level clipboard history or content logging.
 
-## Install
+## Build and install locally
 
-Open the latest successful [Build unsigned packages run](https://github.com/Nemeth-Tamas/reimsbridge/actions/workflows/packages.yml)
-and download the artifact for your machine.
+Build from the root of the repository on each machine. Both scripts
+produce unsigned packages in `dist` and print the SHA-256 of the
+resulting file.
 
-- **Windows x64** · Download `ReimsBridge-Windows-x64-Setup.exe` and
-  double-click it. The per-user installer adds ReimsBridge to the Start
-  menu and offers to launch the tray after installation.
-- **Intel macOS guest** · Download `ReimsBridge-macOS-x86_64.zip`,
-  extract it, drag `ReimsBridge.app` to Applications, and open it from
-  Finder. If Gatekeeper asks for approval, use **Privacy & Security →
-  Open Anyway** for the downloaded app.
+### Windows x64
 
-These development packages are unsigned. Quit any running copy before
-installing an update. Start IPC in the macOS menu and connect from the
-Windows tray using your macOS SSH account. Login startup is available
-in both menus.
+Use PowerShell 7, Rust and Cargo with the x64 MSVC target, Visual
+Studio C++ Build Tools, Perl on `PATH`, and
+[Inno Setup 6](https://jrsoftware.org/isdl.php).
+The script finds `ISCC.exe` on `PATH` or in its default Inno Setup 6
+installation directory. The first release build also compiles vendored
+OpenSSL.
 
-## Building
+```powershell
+git pull --ff-only origin master
+pwsh -NoProfile -ExecutionPolicy RemoteSigned -File .\packaging\windows\build.ps1
+```
 
-Requires Rust, Cargo, MSVC build tools and Perl for the
-vendored OpenSSL build.
+Quit any running ReimsBridge tray. Double-click
+`dist\ReimsBridge-Windows-x64-Setup.exe` in Explorer, then launch
+**ReimsBridge** from the Start menu. The installer is per-user.
+
+### Intel macOS guest
+
+Use full Xcode with the macOS 26.5 SDK or newer and support for Intel
+builds. The package build uses Xcode 26.6. The script runs
+`xcodebuild` with signing disabled. Xcode can stay closed during the
+build.
+
+```bash
+git pull --ff-only origin master
+xcodebuild -version
+bash packaging/macos/build.sh
+```
+
+If the active developer directory points to standalone Command Line
+Tools, select your Xcode installation for the build. Adjust the path
+if Xcode has a different name or location.
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer bash packaging/macos/build.sh
+```
+
+Quit any running ReimsBridge app. In Finder, extract
+`dist/ReimsBridge-macOS-x86_64.zip` and drag `ReimsBridge.app` into
+Applications. Open it from Finder. If macOS blocks the first launch,
+follow [Apple’s Open Anyway instructions](https://support.apple.com/en-us/102445).
+
+Start IPC in the macOS menu and connect from the Windows tray with
+your macOS SSH account. Each app offers a login startup option.
+
+### Other builds
+
+GitHub Actions also builds both packages in
+[Build unsigned packages](https://github.com/Nemeth-Tamas/reimsbridge/actions/workflows/packages.yml).
+
+For Windows development builds without an installer:
 
 ```powershell
 cd windows
