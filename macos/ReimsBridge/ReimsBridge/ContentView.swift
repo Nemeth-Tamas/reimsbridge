@@ -7,6 +7,7 @@
 
 import SwiftUI
 import AppKit
+import ServiceManagement
 
 struct ContentView: View {
     @ObservedObject private var ipc = LocalIPC.shared
@@ -18,6 +19,8 @@ struct ContentView: View {
 
     @State private var validation: (changeCount: Int, message: String)?
     @State private var selfTestStatus = "Not tested"
+    @State private var loginStartupError: String?
+    @State private var loginStartupStatus = SMAppService.mainApp.status
 
     var body: some View {
         Text("ReimsBridge v0.1.0")
@@ -71,6 +74,17 @@ struct ContentView: View {
         }
 
         Menu("Preferences") {
+            Button(loginStartupEnabled ? "Disable Start at Login" : "Enable Start at Login") {
+                toggleLoginStartup()
+            }
+            if loginStartupStatus == .requiresApproval {
+                Button("Open Login Item Settings") {
+                    SMAppService.openSystemSettingsLoginItems()
+                }
+            }
+            if let loginStartupError {
+                Text(loginStartupError)
+            }
             Toggle("Start IPC on Launch", isOn: $startIPCOnLaunch)
             Toggle("Show Transfer Statistics", isOn: $showTransferStatistics)
         }
@@ -89,6 +103,26 @@ struct ContentView: View {
         else { return "Not tested" }
 
         return validation.message
+    }
+
+    private var loginStartupEnabled: Bool {
+        loginStartupStatus == .enabled || loginStartupStatus == .requiresApproval
+    }
+
+    private func toggleLoginStartup() {
+        loginStartupStatus = SMAppService.mainApp.status
+        defer { loginStartupStatus = SMAppService.mainApp.status }
+        do {
+            if loginStartupEnabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+                startIPCOnLaunch = true
+            }
+            loginStartupError = nil
+        } catch {
+            loginStartupError = error.localizedDescription
+        }
     }
 
     private func validateClipboard() {

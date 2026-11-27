@@ -21,6 +21,7 @@ pub struct WindowsClipboardMetadata {
     pub sequence_number: u32,
     pub has_plain_text: bool,
     pub has_extended_content: bool,
+    pub has_files: bool,
     pub is_excluded: bool,
 }
 
@@ -47,7 +48,8 @@ pub fn metadata_checked() -> Result<Option<WindowsClipboardMetadata>, Box<dyn Er
 
     let has_plain_text = is_format_avail(formats::CF_UNICODETEXT);
     let native_formats = ExtendedFormats::get()?;
-    let has_extended_content = !is_format_avail(formats::CF_HDROP)
+    let has_files = is_format_avail(formats::CF_HDROP);
+    let has_extended_content = !has_files
         && [
             native_formats.rtf,
             native_formats.html,
@@ -69,6 +71,7 @@ pub fn metadata_checked() -> Result<Option<WindowsClipboardMetadata>, Box<dyn Er
         sequence_number: after,
         has_plain_text,
         has_extended_content,
+        has_files,
         is_excluded,
     }))
 }
@@ -334,6 +337,56 @@ pub fn write_bundle_checked(
         return Err("Windows clipboard bundle write could not be verified".into());
     }
     Ok(Some(written_sequence))
+}
+
+pub fn read_files(
+    expected_sequence: u32,
+) -> Result<ReadOutcome<Vec<std::path::PathBuf>>, Box<dyn Error>> {
+    let _guard = Clipboard::new_attempts(10)?;
+    if sequence_number()? != expected_sequence {
+        return Ok(ReadOutcome::Changed);
+    }
+    if !is_format_avail(formats::CF_HDROP) {
+        return Ok(ReadOutcome::Unavailable);
+    }
+
+    let mut paths = Vec::<std::path::PathBuf>::new();
+    formats::FileList.read_clipboard(&mut paths)?;
+    if sequence_number()? != expected_sequence {
+        return Ok(ReadOutcome::Changed);
+    }
+    if paths.is_empty() {
+        return Ok(ReadOutcome::Unavailable);
+    }
+    Ok(ReadOutcome::Data(paths))
+}
+
+pub fn write_files_checked(
+    paths: &[std::path::PathBuf],
+    expected_sequence: u32,
+) -> Result<Option<u32>, Box<dyn Error>> {
+    let encoded = paths
+        .iter()
+        .map(|path| path.to_str().ok_or("Clipboard file path is not Unicode"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let preferred_effect = register_format("Preferred DropEffect")
+        .ok_or("Cannot register the clipboard copy action")?
+        .get();
+
+    let guard = Clipboard::new_attempts(10)?;
+    if sequence_number()? != expected_sequence {
+        return Ok(None);
+    }
+    raw::empty()?;
+    raw::set_file_list_with(&encoded, NoClear)?;
+    raw::set_without_clear(preferred_effect, &1u32.to_le_bytes())?;
+    drop(guard);
+
+    let actual = sequence_number()?;
+    if !matches!(read_files(actual)?, ReadOutcome::Data(paths_read) if paths_read == paths) {
+        return Err("Windows file clipboard update could not be verified".into());
+    }
+    Ok(Some(actual))
 }
 
 pub fn check() -> Result<(), Box<dyn Error>> {

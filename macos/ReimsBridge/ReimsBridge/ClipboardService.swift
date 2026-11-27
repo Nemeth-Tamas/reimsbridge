@@ -12,6 +12,7 @@ struct ClipboardMetadata {
     let changeCount: Int
     let hasPlainText: Bool
     let hasExtendedContent: Bool
+    let hasFileURLs: Bool
     let isExcluded: Bool
 }
 
@@ -66,7 +67,7 @@ enum ClipboardService {
     ) -> ClipboardMetadata {
         let types = pasteboard.types ?? []
         
-        return ClipboardMetadata(changeCount: pasteboard.changeCount, hasPlainText: types.contains(.string), hasExtendedContent: ClipboardBundle.isAvailable(in: types), isExcluded: types.contains {
+        return ClipboardMetadata(changeCount: pasteboard.changeCount, hasPlainText: types.contains(.string), hasExtendedContent: ClipboardBundle.isAvailable(in: types), hasFileURLs: types.contains(.fileURL), isExcluded: types.contains {
             excludedTypes.contains($0.rawValue)
         })
     }

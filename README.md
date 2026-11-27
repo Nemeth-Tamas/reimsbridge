@@ -22,6 +22,8 @@ host and a macOS guest running under Reims vGPU/QEMU.
 - Versioned clipboard format negotiation with legacy text compatibility.
 - Native RTF and HTML with plain-text fallback when present at the source.
 - Native PNG clipboard images with Windows bitmap and macOS TIFF representations.
+- Explorer and Finder file, folder, and multi-selection copy via bounded SFTP streaming.
+- Optional launch at login on Windows and macOS.
 - Password authentication and SSH host-key verification.
 - Clipboard metadata and native change-counter inspection.
 - Counter-aware conditional clipboard writes.
@@ -78,9 +80,44 @@ Host-key, authentication, and invalid IPC protocol failures stop the
 watcher. **View Connection Details** shows the latest failure or any
 credential storage warning.
 
-**Stop Synchronization** cancels a pending retry, finishes any current
-polling step, and ends the SSH session. The tray and the foreground
-watcher share a single watcher slot, including during `watch-test`.
+**Stop Synchronization** cancels a pending retry or file transfer,
+finishes any current clipboard polling step, and ends the SSH session.
+The tray and foreground watcher share a single watcher slot, including
+during `watch-test`.
+
+Choose **Enable Start at Login** in the Windows tray after saving your
+SSH login. This registers the current tray executable for the current
+Windows user and starts synchronization from the saved login when it
+launches. Run the tray from a location you intend to keep.
+
+### File and folder copy
+
+Copy existing files or folders in Explorer or Finder. Wait for
+**Ready to paste** in the Windows tray's **View Connection Details**
+or the foreground watch log, then paste on the other desktop.
+A selection can contain multiple files, folders, and empty folders.
+The transfer uses SFTP over the existing authenticated SSH connection,
+checks large-file free space where supported, and verifies file lengths.
+The clipboard receives the staged file list only after the full transfer
+and a fresh clipboard-counter check.
+
+The app uses a fixed streaming buffer and has no fixed per-file byte
+ceiling in this path. Destination free space, filesystem restrictions,
+and supported names govern the transfer. The initial path accepts
+ordinary files and directories and skips symbolic links, junctions,
+and other reparse points. It preserves file data and hierarchy. File
+permissions, extended attributes, alternate data streams, and other
+filesystem metadata are outside this initial path.
+
+Completed staged files remain under `%LOCALAPPDATA%\ReimsBridge\FileTransfers`
+on Windows and `~/.reimsbridge/transfers` on macOS. Keep them while a
+clipboard selection or paste still uses them. Failed batches are
+cleaned up when the transfer can reach its staging directory.
+
+`watch-test` exercises a multi-root selection, nested and empty
+directories, and byte-for-byte file checks across both native
+clipboards. For large-file acceptance, copy a file of at least 1 GiB
+in each direction and compare SHA-256 hashes after pasting.
 
 ### Foreground synchronization and diagnostics
 
@@ -161,7 +198,10 @@ Under **Preferences**, enable **Start IPC on Launch** to start the
 listener whenever ReimsBridge opens. Manual startup is the default.
 **Show Transfer Statistics** controls whether the menu displays session
 counters and is on by default. Both preferences persist across launches.
-Quitting the app stops the listener.
+Quitting the app stops the listener. Use **Preferences → Enable Start
+at Login** to register the macOS app as a login item. Enabling it also
+turns on **Start IPC on Launch**. If macOS requests approval, use
+**Open Login Item Settings** from the same menu.
 
 Transfer statistics count text payloads and UTF-8 bytes for completed IPC
 exchanges. Sent counts report reads from the Mac pasteboard. Received
@@ -284,7 +324,7 @@ authenticate again after an outage. Remembered logins are stored in
 Windows Credential Manager for the current Windows user on this machine.
 
 Text, rich text, and bitmap images use validated clipboard representations.
-File and folder transfers are planned for the streaming milestones.
+File data streams through the host-key-verified SSH session using SFTP.
 
 ## Production acceptance criteria
 
@@ -370,8 +410,8 @@ transfers without unnecessary eager copying.
 - [x] M4: Native Windows system tray companion
 - [ ] M5: Reconnection and credential management (saved credentials verified, reconnect acceptance pending)
 - [x] M6: Multi-format clipboard protocol
-- [ ] M7: Native image and rich-text synchronization (native acceptance pending)
-- [ ] M8: Streaming file transfer protocol
-- [ ] M9: Transparent Explorer and Finder integration
+- [x] M7: Native image and rich-text synchronization
+- [ ] M8: Streaming file transfer protocol (native and 1 GiB acceptance pending)
+- [ ] M9: Transparent Explorer and Finder integration (native acceptance pending)
 - [ ] M10: Performance, security and reliability hardening
 - [ ] M11: Production packaging and release

@@ -1,6 +1,6 @@
-use crate::credentials;
 use crate::instance::InstanceGuard;
 use crate::watch_worker::{Update, Worker};
+use crate::{credentials, login_startup};
 use std::error::Error;
 use std::io;
 use std::mem::size_of;
@@ -36,6 +36,7 @@ const VIEW_ERROR: usize = 3;
 const QUIT: usize = 4;
 const START_DIFFERENT: usize = 5;
 const FORGET_SAVED: usize = 6;
+const LOGIN_STARTUP: usize = 7;
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 static RESTORE_ICON: AtomicBool = AtomicBool::new(false);
@@ -80,6 +81,7 @@ struct TrayState {
     phase: Status,
     retry_details: Option<String>,
     credential_warning: Option<String>,
+    file_notice: Option<String>,
     error: Option<String>,
     quitting: bool,
 }
@@ -116,19 +118,46 @@ impl TrayState {
         };
 
         match result {
-            Ok(Some(credentials)) => match Worker::start(credentials) {
-                Ok(worker) => {
-                    self.phase = Status::Connecting;
-                    self.error = None;
-                    self.retry_details = None;
-                    self.credential_warning = credential_warning;
-                    self.worker = Some(worker);
-                }
-                Err(error) => self.error = Some(error.to_string()),
-            },
+            Ok(Some(credentials)) => self.launch_worker(credentials, credential_warning),
             Ok(None) => {}
             Err(error) => self.error = Some(error.to_string()),
         }
+    }
+
+    fn launch_worker(&mut self, credentials: credentials::Credentials, warning: Option<String>) {
+        match Worker::start(credentials) {
+            Ok(worker) => {
+                self.phase = Status::Connecting;
+                self.error = None;
+                self.retry_details = None;
+                self.credential_warning = warning;
+                self.file_notice = None;
+                self.worker = Some(worker);
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+
+    fn start_at_login(&mut self) {
+        match credentials::load_saved() {
+            Ok(Some(credentials)) => self.launch_worker(credentials, None),
+            Ok(None) => {
+                self.error = Some("Save an SSH login before using automatic synchronization".into())
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+
+    fn toggle_login_startup(&mut self) {
+        let result = (|| -> Result<(), Box<dyn Error>> {
+            let enable = !login_startup::enabled()?;
+            if enable && credentials::load_saved()?.is_none() {
+                return Err("Save your SSH login before enabling Start at Login".into());
+            }
+            login_startup::set_enabled(enable)?;
+            Ok(())
+        })();
+        self.error = result.err().map(|error| error.to_string());
     }
 
     fn forget_saved(&mut self) {
@@ -143,6 +172,7 @@ impl TrayState {
             .as_deref()
             .or(self.retry_details.as_deref())
             .or(self.credential_warning.as_deref())
+            .or(self.file_notice.as_deref())
     }
 
     fn stop(&self) {
@@ -172,6 +202,7 @@ impl TrayState {
                         ));
                     }
                     Update::CredentialWarning(warning) => self.credential_warning = Some(warning),
+                    Update::FileNotice(message) => self.file_notice = Some(message),
                 }
             }
         }
@@ -329,6 +360,16 @@ impl TrayWindow {
                 FORGET_SAVED,
                 w!("Forget Saved Credentials"),
             );
+            AppendMenuW(
+                menu,
+                MF_STRING,
+                LOGIN_STARTUP,
+                if login_startup::enabled().unwrap_or(false) {
+                    w!("Disable Start at Login")
+                } else {
+                    w!("Enable Start at Login")
+                },
+            );
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
             AppendMenuW(menu, MF_STRING, QUIT, w!("Quit ReimsBridge"));
 
@@ -394,8 +435,16 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let _instance = InstanceGuard::tray()?;
     let window = TrayWindow::new()?;
     let mut state = TrayState::default();
+    let mut login_pending = std::env::args_os().skip(1).any(|arg| arg == "--login");
     let mut displayed = state.status();
-    if !window.notify_icon(NIM_ADD, displayed) {
+    if window.notify_icon(NIM_ADD, displayed) {
+        if login_pending {
+            state.start_at_login();
+            login_pending = false;
+        }
+    } else if login_pending {
+        RESTORE_ICON.store(true, Ordering::Relaxed);
+    } else {
         return Err("Could not add ReimsBridge to the Windows notification area".into());
     }
 
@@ -417,6 +466,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     START => state.start(window.0, true),
                     START_DIFFERENT => state.start(window.0, false),
                     FORGET_SAVED => state.forget_saved(),
+                    LOGIN_STARTUP => state.toggle_login_startup(),
                     STOP => state.stop(),
                     VIEW_ERROR => {
                         if let Some(details) = state.details() {
@@ -451,6 +501,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         if RESTORE_ICON.swap(false, Ordering::Relaxed) {
             if !window.notify_icon(NIM_ADD, status) && !window.notify_icon(NIM_MODIFY, status) {
                 RESTORE_ICON.store(true, Ordering::Relaxed);
+            } else if login_pending {
+                state.start_at_login();
+                login_pending = false;
             }
         } else if displayed != status && !window.notify_icon(NIM_MODIFY, status) {
             RESTORE_ICON.store(true, Ordering::Relaxed);

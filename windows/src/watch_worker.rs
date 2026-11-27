@@ -14,6 +14,7 @@ pub enum Update {
     Active,
     Reconnecting { delay: Duration, reason: String },
     CredentialWarning(String),
+    FileNotice(String),
 }
 
 pub struct Worker {
@@ -140,10 +141,17 @@ fn attempt(
     }
 
     // Each call owns a new sync engine and establishes a fresh baseline.
-    let result = watch::run_until_stopped(&session, stop, || {
-        backoff.reset();
-        let _ = updates.send(Update::Active);
-    });
+    let result = watch::run_until_stopped(
+        &session,
+        stop,
+        || {
+            backoff.reset();
+            let _ = updates.send(Update::Active);
+        },
+        |message| {
+            let _ = updates.send(Update::FileNotice(message.into()));
+        },
+    );
 
     if result.is_ok() {
         let _ = session.disconnect(None, "ReimsBridge session complete", None);

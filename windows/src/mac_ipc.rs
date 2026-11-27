@@ -74,6 +74,10 @@ pub struct MacStatus {
     #[serde(default)]
     pub watch_status_supported: bool,
     #[serde(default)]
+    pub file_transfer_version: u32,
+    #[serde(default)]
+    pub has_file_urls: bool,
+    #[serde(default)]
     formats: Option<FormatStatus>,
 }
 
@@ -544,6 +548,51 @@ pub fn write_bundle_checked(
     request.push(0);
     let response = query(session, &request, MAX_RESPONSE_BYTES)?;
     parse_format_ack(&response, Some(ClipboardFormat::Bundle))
+}
+
+const MAX_FILE_CONTROL_BYTES: usize = 1_048_576;
+
+pub fn file_stage(session: &Session) -> Result<std::path::PathBuf, Box<dyn Error>> {
+    let response = query(session, b"file-stage\n", MAX_FILE_CONTROL_BYTES)?;
+    if response.starts_with(b"ERR ") {
+        return Err("Could not open the Mac file staging directory".into());
+    }
+    let paths: [String; 1] = serde_json::from_slice(&response)?;
+    let [path] = paths;
+    Ok(path.into())
+}
+
+pub fn file_offer(
+    session: &Session,
+    expected_change_count: i64,
+) -> Result<ReadOutcome<Vec<String>>, Box<dyn Error>> {
+    let request = format!("file-offer {expected_change_count}\n");
+    let response = query(session, request.as_bytes(), MAX_FILE_CONTROL_BYTES)?;
+    match response.as_slice() {
+        b"ERR CLIPBOARD_CHANGED\n" => Ok(ReadOutcome::Changed),
+        b"ERR NO_FILES\n" => Ok(ReadOutcome::Unavailable),
+        b"ERR OVERSIZED\n" => Err("Mac file selection is too large to describe".into()),
+        _ => {
+            let paths: Vec<String> = serde_json::from_slice(&response)?;
+            if paths.is_empty() {
+                return Ok(ReadOutcome::Unavailable);
+            }
+            Ok(ReadOutcome::Data(paths))
+        }
+    }
+}
+
+pub fn file_publish(
+    session: &Session,
+    expected_change_count: i64,
+    batch: &str,
+) -> Result<Option<i64>, Box<dyn Error>> {
+    let request = format!("file-publish {expected_change_count} {batch}\n");
+    let response = query(session, request.as_bytes(), MAX_RESPONSE_BYTES)?;
+    if response == b"ERR FILE_STAGE\n" {
+        return Err("Mac rejected the staged file selection".into());
+    }
+    parse_checked_write_response(&response)
 }
 
 pub fn test_checked_write(session: &Session) -> Result<(), Box<dyn Error>> {

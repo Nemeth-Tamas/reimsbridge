@@ -5,7 +5,7 @@ use crate::sync_engine::{
     still_current,
 };
 use crate::sync_read::ReadOutcome;
-use crate::{clipboard, mac_ipc};
+use crate::{clipboard, file_transfer, mac_ipc, ssh};
 
 use ssh2::Session;
 use std::error::Error;
@@ -16,13 +16,19 @@ use std::time::Duration;
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Copy, Default)]
-struct WatchOptions {
+struct WatchOptions<'a> {
     watch_status: bool,
     transport: mac_ipc::TextTransport,
     bundles: bool,
+    files: bool,
+    stop: Option<&'a AtomicBool>,
+    file_notice: Option<&'a dyn Fn(&str)>,
 }
 
-fn snapshot(session: &Session, options: WatchOptions) -> Result<Option<Snapshot>, Box<dyn Error>> {
+fn snapshot(
+    session: &Session,
+    options: WatchOptions<'_>,
+) -> Result<Option<Snapshot>, Box<dyn Error>> {
     let Some(windows_before) = clipboard::metadata_checked()? else {
         return Ok(None);
     };
@@ -50,6 +56,8 @@ fn snapshot(session: &Session, options: WatchOptions) -> Result<Option<Snapshot>
         mac_has_text: mac.has_text_for(options.transport),
         windows_has_bundle: options.bundles && windows_after.has_extended_content,
         mac_has_bundle: options.bundles && mac.has_bundle(),
+        windows_has_files: options.files && windows_after.has_files,
+        mac_has_files: options.files && mac.has_file_urls,
     }))
 }
 
@@ -262,7 +270,7 @@ fn transfer(
 fn poll_once(
     session: &Session,
     engine: &mut SyncEngine,
-    options: WatchOptions,
+    options: WatchOptions<'_>,
 ) -> Result<Option<Decision>, Box<dyn Error>> {
     let Some(observed) = snapshot(session, options)? else {
         return Ok(None);
@@ -291,11 +299,82 @@ fn poll_once(
         }
 
         Decision::Transfer(direction) => {
-            transfer(session, engine, observed, direction, options.transport)?;
+            let has_files = match direction {
+                Direction::WindowsToMac => observed.windows_has_files,
+                Direction::MacToWindows => observed.mac_has_files,
+            };
+            if has_files {
+                transfer_files(session, engine, observed.counters, direction, options)?;
+            } else {
+                transfer(session, engine, observed, direction, options.transport)?;
+            }
         }
     }
 
     Ok(Some(decision))
+}
+
+fn transfer_files(
+    session: &Session,
+    engine: &mut SyncEngine,
+    counters: Counters,
+    direction: Direction,
+    options: WatchOptions<'_>,
+) -> Result<(), Box<dyn Error>> {
+    use file_transfer::ResultState;
+
+    let result = file_transfer::transfer(
+        session,
+        direction,
+        counters.windows,
+        counters.mac,
+        file_transfer::TransferOptions {
+            stop: options.stop,
+            notice: options.file_notice,
+        },
+        || {
+            let status = WatchOptions {
+                watch_status: options.watch_status,
+                ..WatchOptions::default()
+            };
+            Ok(snapshot(session, status)?
+                .is_some_and(|observed| still_current(counters, observed.counters)))
+        },
+    );
+    let notice = |message: &str| {
+        println!("[FILES] {message}");
+        if let Some(notify) = options.file_notice {
+            notify(message);
+        }
+    };
+    match result {
+        Ok(ResultState::MacPublished(counter)) => engine.record_mac_write(counters, counter),
+        Ok(ResultState::WindowsPublished(sequence)) => {
+            engine.record_windows_write(counters, sequence)
+        }
+        Ok(ResultState::Changed) => notice("Clipboard changed during file transfer"),
+        Ok(ResultState::Unavailable) => skip_if_current(session, engine, counters)?,
+        Err(error) if error.is::<file_transfer::SelectionChanged>() => {
+            notice("Clipboard changed during file transfer");
+        }
+        Err(error) => {
+            if options
+                .stop
+                .is_some_and(|stop| stop.load(Ordering::Relaxed))
+            {
+                notice("File transfer stopped");
+            } else if ssh::is_transport_error(error.as_ref())
+                || mac_ipc::is_unavailable(error.as_ref())
+            {
+                return Err(error);
+            } else {
+                notice(&format!("File transfer failed: {error}"));
+                skip_if_current(session, engine, counters)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn stable_counters(session: &Session) -> Result<Counters, Box<dyn Error>> {
@@ -340,7 +419,7 @@ fn verify_pair(
 fn expect_step(
     session: &Session,
     engine: &mut SyncEngine,
-    options: WatchOptions,
+    options: WatchOptions<'_>,
     expected: Decision,
 ) -> Result<(), Box<dyn Error>> {
     let actual = poll_once(session, engine, options)?;
@@ -358,7 +437,7 @@ fn expect_step(
 fn expect_idle(
     session: &Session,
     engine: &mut SyncEngine,
-    options: WatchOptions,
+    options: WatchOptions<'_>,
     expected: Counters,
     iterations: usize,
 ) -> Result<(), Box<dyn Error>> {
@@ -381,6 +460,7 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
     let options = WatchOptions {
         transport: status.text_transport(),
         bundles: status.supports_bundles(),
+        files: status.file_transfer_version == 1,
         ..WatchOptions::default()
     };
 
@@ -642,16 +722,116 @@ pub fn test(session: &Session) -> Result<(), Box<dyn Error>> {
     if options.bundles {
         test_bundles(session, &mut engine, options)?;
     }
+    if options.files {
+        test_files(session, &mut engine, options)?;
+    }
     println!();
     println!("[PASS] ALL AUTOMATIC SYNCHRONIZATION TESTS PASSED");
 
     Ok(())
 }
 
+fn test_files(
+    session: &Session,
+    engine: &mut SyncEngine,
+    options: WatchOptions<'_>,
+) -> Result<(), Box<dyn Error>> {
+    use std::fs;
+    use std::io::Read;
+    use std::path::Path;
+
+    let fixture =
+        std::env::temp_dir().join(format!("ReimsBridge-test-{}", file_transfer::batch_id()?));
+    fs::create_dir(&fixture)?;
+    let directory_name = "Reims folder é";
+    let file_name = "Reims standalone.bin";
+    let directory = fixture.join(directory_name);
+    let standalone = fixture.join(file_name);
+    fs::create_dir(&directory)?;
+    fs::create_dir(directory.join("empty"))?;
+    let nested = directory.join("nested.bin");
+    let bytes: Vec<u8> = (0..800_001).map(|index| (index % 251) as u8).collect();
+    fs::write(&nested, &bytes)?;
+    fs::write(&standalone, b"ReimsBridge file selection")?;
+
+    let before = stable_counters(session)?;
+    clipboard::write_files_checked(&[directory, standalone], before.windows)?
+        .ok_or("Windows clipboard changed before file fixture publication")?;
+    expect_step(
+        session,
+        engine,
+        options,
+        Decision::Transfer(Direction::WindowsToMac),
+    )?;
+    let uploaded = stable_counters(session)?;
+    let ReadOutcome::Data(paths) = mac_ipc::file_offer(session, uploaded.mac)? else {
+        return Err("Mac clipboard is missing the uploaded file selection".into());
+    };
+    if paths.len() != 2 {
+        return Err("Mac clipboard did not retain both selection roots".into());
+    }
+    let parent = paths[0]
+        .rsplit_once('/')
+        .ok_or("Invalid staged Mac path")?
+        .0;
+    let batch = parent.rsplit('/').next().ok_or("Invalid Mac batch name")?;
+    let sftp = session.sftp()?;
+    let remote_dir = format!("{parent}/{directory_name}");
+    let remote_file = format!("{parent}/{file_name}");
+    let mut received = Vec::new();
+    sftp.open(Path::new(&format!("{remote_dir}/nested.bin")))?
+        .take(bytes.len() as u64 + 1)
+        .read_to_end(&mut received)?;
+    let remote_marker = sftp.lstat(Path::new(&remote_file))?;
+    if received != bytes
+        || remote_marker.size != Some(b"ReimsBridge file selection".len() as u64)
+        || !sftp
+            .lstat(Path::new(&format!("{remote_dir}/empty")))?
+            .is_dir()
+    {
+        return Err("Windows to Mac file fixture did not match".into());
+    }
+    expect_idle(session, engine, options, uploaded, 2)?;
+    println!("[PASS] Windows to macOS files, multiple roots, and nested directory");
+
+    mac_ipc::file_publish(session, uploaded.mac, batch)?
+        .ok_or("Mac clipboard changed before file fixture publication")?;
+    expect_step(
+        session,
+        engine,
+        options,
+        Decision::Transfer(Direction::MacToWindows),
+    )?;
+    let downloaded = stable_counters(session)?;
+    let ReadOutcome::Data(paths) = clipboard::read_files(downloaded.windows)? else {
+        return Err("Windows clipboard is missing the downloaded file selection".into());
+    };
+    let folder = paths
+        .iter()
+        .find(|path| path.file_name().is_some_and(|name| name == directory_name))
+        .ok_or("Windows clipboard is missing the staged folder")?;
+    let file = paths
+        .iter()
+        .find(|path| path.file_name().is_some_and(|name| name == file_name))
+        .ok_or("Windows clipboard is missing the staged standalone file")?;
+    if paths.len() != 2
+        || !folder.join("empty").is_dir()
+        || fs::read(folder.join("nested.bin"))? != bytes
+        || fs::read(file)? != b"ReimsBridge file selection"
+    {
+        return Err("Mac to Windows file fixture did not match".into());
+    }
+    expect_idle(session, engine, options, downloaded, 2)?;
+    // Both clipboard selections now reference application-owned staging copies.
+    fs::remove_dir_all(fixture)?;
+    println!("[PASS] macOS to Windows files, multiple roots, and nested directory");
+    Ok(())
+}
+
 fn test_bundles(
     session: &Session,
     engine: &mut SyncEngine,
-    options: WatchOptions,
+    options: WatchOptions<'_>,
 ) -> Result<(), Box<dyn Error>> {
     for (direction, include_rich_text) in [
         (Direction::WindowsToMac, true),
@@ -706,13 +886,14 @@ fn test_bundles(
 
 pub fn run(session: &Session) -> Result<(), Box<dyn Error>> {
     println!("[WATCH] Press Ctrl+C to stop");
-    run_until_stopped(session, &AtomicBool::new(false), || {})
+    run_until_stopped(session, &AtomicBool::new(false), || {}, |_| {})
 }
 
 pub fn run_until_stopped(
     session: &Session,
     stop: &AtomicBool,
     mut on_active: impl FnMut(),
+    file_notice: impl Fn(&str),
 ) -> Result<(), Box<dyn Error>> {
     let mut engine = SyncEngine::new();
 
@@ -731,6 +912,9 @@ pub fn run_until_stopped(
         watch_status: status.watch_status_supported,
         transport: status.text_transport(),
         bundles: status.supports_bundles(),
+        files: status.file_transfer_version == 1,
+        stop: Some(stop),
+        file_notice: Some(&file_notice),
     };
     println!(
         "[WATCH] Clipboard framing: {}",
@@ -739,6 +923,10 @@ pub fn run_until_stopped(
 
     if options.bundles {
         println!("[WATCH] Native rich text and image bundles enabled");
+    }
+
+    if options.files {
+        println!("[WATCH] Streaming file and folder copies enabled");
     }
 
     if options.watch_status {

@@ -215,6 +215,20 @@ final class IPCConnection {
             omittingEmptySubsequences: false
         )
 
+        if header == "file-stage", request.count == payloadStart {
+            return finishRequest(FileClipboard.stageResponse())
+        }
+
+        if fields.first == "file-offer", fields.count == 2,
+           request.count == payloadStart, let counter = parseCounter(fields[1]) {
+            return finishRequest(FileClipboard.offer(expected: counter))
+        }
+
+        if fields.first == "file-publish", fields.count == 3,
+           request.count == payloadStart, let counter = parseCounter(fields[1]) {
+            return finishRequest(FileClipboard.publish(expected: counter, batch: fields[2]))
+        }
+
         if fields.first == "read-format" {
             guard fields.count == 3,
                   request.count == payloadStart,
@@ -392,7 +406,7 @@ final class IPCConnection {
 
         let json =
             """
-            {"protocol":2,"status":"ok","watchStatusSupported":true,"changeCount":\(metadata.changeCount),"hasPlainText":\(metadata.hasPlainText),"isExcluded":\(metadata.isExcluded),"formats":{"version":1,"supported":[\(formatList(supported))],"available":[\(formatList(available))]}}
+            {"protocol":2,"status":"ok","watchStatusSupported":true,"changeCount":\(metadata.changeCount),"hasPlainText":\(metadata.hasPlainText),"isExcluded":\(metadata.isExcluded),"fileTransferVersion":1,"hasFileURLs":\(metadata.hasFileURLs),"formats":{"version":1,"supported":[\(formatList(supported))],"available":[\(formatList(available))]}}
             """ + "\n"
 
         return Data(json.utf8)

@@ -13,6 +13,8 @@ pub struct Snapshot {
     pub mac_has_text: bool,
     pub windows_has_bundle: bool,
     pub mac_has_bundle: bool,
+    pub windows_has_files: bool,
+    pub mac_has_files: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,11 +72,17 @@ impl SyncEngine {
 
             (true, true) => Decision::Conflict,
 
-            (true, false) if snapshot.windows_has_text || snapshot.windows_has_bundle => {
+            (true, false)
+                if snapshot.windows_has_text
+                    || snapshot.windows_has_bundle
+                    || snapshot.windows_has_files =>
+            {
                 Decision::Transfer(Direction::WindowsToMac)
             }
 
-            (false, true) if snapshot.mac_has_text || snapshot.mac_has_bundle => {
+            (false, true)
+                if snapshot.mac_has_text || snapshot.mac_has_bundle || snapshot.mac_has_files =>
+            {
                 Decision::Transfer(Direction::MacToWindows)
             }
 
@@ -137,6 +145,8 @@ mod tests {
             mac_has_text: true,
             windows_has_bundle: false,
             mac_has_bundle: false,
+            windows_has_files: false,
+            mac_has_files: false,
         }
     }
 
